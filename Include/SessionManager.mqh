@@ -148,12 +148,20 @@ public:
       return(false);
      }
 
-   //--- Update / query whether price has exited the prior-day range
-   bool AsiaRangeExited(const double bid)
+   //--- Update / query whether price has exited the prior-day range. Scans
+   //    every bar's wick since the session opened (not just the live bid),
+   //    so a spike that pierces the range and closes back inside before the
+   //    next bar still counts - mirrors the "wick is enough" sweep model in
+   //    Liquidity.mqh instead of missing it via a single point-in-time sample.
+   bool AsiaRangeExited(const datetime sessionStart)
      {
       if(!m_rangeValid) return(false);
-      if(!m_rangeExited && (bid>m_rangeHigh || bid<m_rangeLow))
-         m_rangeExited=true;
+      if(m_rangeExited)  return(true);
+      if(sessionStart<=0) return(false);
+      MqlRates r[]; ArraySetAsSeries(r,true);
+      int n=CopyRates(m_symbol,m_s.tf,sessionStart,TimeCurrent(),r);
+      for(int i=0;i<n;i++)
+         if(r[i].high>m_rangeHigh || r[i].low<m_rangeLow){ m_rangeExited=true; break; }
       return(m_rangeExited);
      }
 

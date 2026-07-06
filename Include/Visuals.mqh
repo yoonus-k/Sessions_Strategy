@@ -4,8 +4,8 @@
 //|   - Prior-day last-4h range (rule 2) + projected high/low lines   |
 //|   - Developing Asia session range                                 |
 //|   - Developing NY session range                                   |
-//|  Each box carries a text label. Objects are keyed by day so past   |
-//|  days stay drawn for review.                                      |
+//|  Each box carries a text label. All session-tied drawings         |
+//|  (including the prior-4h range card) are wiped at session end.    |
 //+------------------------------------------------------------------+
 #ifndef SESSIONS_STRATEGY_VISUALS_MQH
 #define SESSIONS_STRATEGY_VISUALS_MQH
@@ -148,9 +148,24 @@ public:
 
    void Destroy(){ ObjectsDeleteAll(m_chart,VIS_PREFIX); }
 
-   //--- Wipe every drawing (called when a new session starts). The
-   //    prior-day 4H range is redrawn next bar by UpdateVisuals (Asia only).
+   //--- Wipe every drawing on the chart (called on EA shutdown).
    void ClearAll(){ ObjectsDeleteAll(m_chart,VIS_PREFIX); }
+
+   //--- Wipe every drawing that belongs to a session (sweep target, CHoCH,
+   //    IFVG, FVG zones, swing dots, session box, trade levels, and the
+   //    Prior-Day 4H range card) the moment that session ends OR a new one
+   //    begins. The range card is rebuilt from scratch during the next
+   //    20:00->00:00 window (UpdateRangeBox), so nothing needs to survive here.
+   void ClearSessionDrawings()
+     {
+      int total=ObjectsTotal(m_chart,-1,-1);
+      for(int i=total-1;i>=0;i--)
+        {
+         string name=ObjectName(m_chart,i,-1,-1);
+         if(StringFind(name,VIS_PREFIX)!=0) continue; // not ours
+         ObjectDelete(m_chart,name);
+        }
+     }
 
    //--- The single marked low/high to be swept (trails to the newest)
    void DrawSweepTarget(const bool buyBias,const double level,

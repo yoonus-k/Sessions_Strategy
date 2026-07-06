@@ -49,6 +49,7 @@ input double          InpPreSweepHours      = 8.0;         // Look this many hou
 
 input group "Risk"
 input double          InpRiskPercent        = 0.95;        // Risk per trade (% capital)
+input ENUM_SL_ANCHOR  InpSLAnchor           = SL_ANCHOR_CHOCH_LEG; // SL anchor (CHoCH leg extreme / sweep wick)
 input double          InpSLBufferPoints     = 0;           // SL pad beyond wick (points)
 input double          InpBreakEvenAtPercent = 2.0;         // Move SL to BE at (%)
 
@@ -140,6 +141,7 @@ void BuildSettings()
    g_s.chochEntryRetrace     =InpChochRetrace;
    g_s.preSweepHours         =InpPreSweepHours;
    g_s.riskPercent           =InpRiskPercent;
+   g_s.slAnchor              =InpSLAnchor;
    g_s.slBufferPoints        =InpSLBufferPoints;
    g_s.breakEvenAtPercent    =InpBreakEvenAtPercent;
    g_s.defaultTargetPercent  =InpDefaultTargetPct;
@@ -340,7 +342,13 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double point =SymbolInfoDouble(_Symbol,SYMBOL_POINT);
    double buf   =g_s.slBufferPoints*point;
-   double sl    =isBuy?g_liq.SweepExtreme()-buf:g_liq.SweepExtreme()+buf;
+   // SL anchor: the CHoCH breaking-leg extreme keeps the stop just beyond the
+   // BOS leg; the sweep wick (session extreme) can sit far deeper when the
+   // sweep flush preceded the reversal leg. IFVG has no leg -> sweep wick.
+   double anchor=g_liq.SweepExtreme();
+   if(g_s.slAnchor==SL_ANCHOR_CHOCH_LEG && sig.model=="CHoCH")
+      anchor=isBuy?sig.legLo:sig.legHi;
+   double sl    =isBuy?anchor-buf:anchor+buf;
    long   stopsLvl=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    double minDist =stopsLvl*point;
 
@@ -415,12 +423,13 @@ void EvaluateAndAct(const datetime now)
       st.floatPct=g_risk.FloatPercent(PositionGetDouble(POSITION_PROFIT));
 
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   if(st.session==SESSION_ASIA && st.rangeValid)
-      st.rangeExited=g_session.AsiaRangeExited(bid);
 
    // bound ALL detection to bars from the session open onward
    datetime ss=(st.session!=SESSION_NONE)?g_session.SessionStartServer(now):0;
    g_entry.SetWindow(ss);
+
+   if(st.session==SESSION_ASIA && st.rangeValid)
+      st.rangeExited=g_session.AsiaRangeExited(ss);
 
    // sweep + entry evaluated whenever armed & in session (for the dashboard),
    // independent of the entry window
@@ -592,12 +601,15 @@ void OnTick()
    if(g_panel.PollClicks())
       g_liq.Reset();                 // new bias -> fresh sweep
 
-   // new session begins -> wipe all drawings (4H range is redrawn in Asia) and
-   // reset the sweep state
+   // session boundary (entering OR leaving a session): wipe this session's
+   // drawings immediately - sweep target, CHoCH/IFVG, swings, session box,
+   // trade levels, and the Prior-Day 4H range card. The range card is
+   // rebuilt from scratch during the next 20:00->00:00 window. Reset the
+   // sweep state either way.
    string sk=g_session.SessionKey(now);
-   if(sk!="" && sk!=g_lastSessionKey)
+   if(sk!=g_lastSessionKey)
      {
-      g_visuals.ClearAll();
+      g_visuals.ClearSessionDrawings();
       g_liq.Reset();
       g_lastSessionKey=sk;
      }

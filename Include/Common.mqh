@@ -30,6 +30,13 @@ enum ENUM_ENTRY_MODEL
    ENTRY_EITHER      = 3  // whichever fires first
   };
 
+//--- Where the initial stop loss is anchored
+enum ENUM_SL_ANCHOR
+  {
+   SL_ANCHOR_CHOCH_LEG  = 0, // CHoCH breaking-leg extreme (IFVG falls back to sweep wick)
+   SL_ANCHOR_SWEEP_WICK = 1  // Sweep wick (session extreme of the sweeping leg)
+  };
+
 //--- Per-trade outcome bookkeeping for session caps
 enum ENUM_TRADE_RESULT
   {
@@ -63,6 +70,7 @@ struct SSettings
    double            preSweepHours;           // how far left of session open to look for the low/high to sweep
    // Risk
    double            riskPercent;             // 0.95
+   ENUM_SL_ANCHOR    slAnchor;                // CHoCH leg extreme vs sweep wick
    double            slBufferPoints;          // pad beyond wick
    double            breakEvenAtPercent;      // 2.0
    // Targets

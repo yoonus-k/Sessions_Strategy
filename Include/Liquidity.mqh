@@ -59,9 +59,21 @@ public:
    //    BUY  : the marked LOW trails to the most recent confirmed swing low
    //           (it starts as the nearest pre-session low and follows new lows
    //           down). It is "swept" the moment a more-recent IN-SESSION bar
-   //           trades below the marked low; the marker then freezes there.
+   //           trades below the marked low (WICK is enough, no close needed);
+   //           the marker then freezes there.
    //    SELL : mirror with swing highs.
    //    SL anchor = the session extreme (lowest low / highest high).
+   //
+   //    IMPORTANT: the break-check against the CURRENTLY marked level always
+   //    runs first, using raw wicks, before any retargeting. IsSwingLow/High
+   //    requires N bars on BOTH sides to not have a lower/higher extreme, so
+   //    the very wick that sweeps the marked level also disqualifies that
+   //    level from being re-found as "a swing" on this same bar. If we let
+   //    the swing search run first, it can silently skip past the level that
+   //    just got swept (falling back to an older, deeper, unrelated swing)
+   //    and the sweep would never be detected. Checking the stored target
+   //    first avoids that: a wick always counts, and the target can only
+   //    move forward in time (never back to a stale/older level).
    void Update(const ENUM_BIAS bias,const datetime sessionStart)
      {
       if(bias==BIAS_NONE || sessionStart<=0) return;
@@ -73,37 +85,47 @@ public:
 
       if(bias==BIAS_BUY)
         {
-         // marked low ALWAYS trails to the most recent confirmed swing low
-         int iL=-1;
-         for(int i=N;i<n-N;i++) if(IsSwingLow(r,n,i,N)){ iL=i; break; }
-         if(iL>=0)
+         // 1) break-check the level we are CURRENTLY watching, wick is enough
+         if(!m_swept && m_targetLevel>0)
+            for(int k=0;k<n;k++)
+               if(r[k].time>=sessionStart && r[k].time>m_targetTime && r[k].low<m_targetLevel)
+                 { m_swept=true; m_sweptLevel=m_targetLevel; break; }
+
+         // 2) not yet swept -> may trail forward to a newer confirmed swing low
+         if(!m_swept)
            {
-            m_targetLevel=r[iL].low; m_targetTime=r[iL].time;
-            // swept latches once: a more-recent in-session bar trades below the
-            // marked low (its right-side bars are higher, so this is a true cross)
-            if(!m_swept)
-               for(int k=0;k<iL;k++)
-                  if(r[k].time>=sessionStart && r[k].low<m_targetLevel)
-                    { m_swept=true; m_sweptLevel=m_targetLevel; break; }
+            int iL=-1;
+            for(int i=N;i<n-N;i++) if(IsSwingLow(r,n,i,N)){ iL=i; break; }
+            if(iL>=0 && (m_targetLevel<=0 || r[iL].time>m_targetTime))
+              { m_targetLevel=r[iL].low; m_targetTime=r[iL].time; }
            }
+
+         // SL anchor = the extreme of the SWEEPING leg only (from the
+         // currently marked target's own bar onward), never a stale/deeper
+         // low from earlier in the session that is unrelated to this sweep.
+         datetime extFrom=(m_targetTime>0)?m_targetTime:sessionStart;
          double lo=DBL_MAX; datetime lt=sessionStart;
-         for(int i=0;i<n;i++) if(r[i].time>=sessionStart && r[i].low<lo){ lo=r[i].low; lt=r[i].time; }
+         for(int i=0;i<n;i++) if(r[i].time>=extFrom && r[i].low<lo){ lo=r[i].low; lt=r[i].time; }
          if(lo<DBL_MAX){ m_sweepExtreme=lo; m_sweepTime=lt; }
         }
       else // BIAS_SELL
         {
-         int iH=-1;
-         for(int i=N;i<n-N;i++) if(IsSwingHigh(r,n,i,N)){ iH=i; break; }
-         if(iH>=0)
+         if(!m_swept && m_targetLevel>0)
+            for(int k=0;k<n;k++)
+               if(r[k].time>=sessionStart && r[k].time>m_targetTime && r[k].high>m_targetLevel)
+                 { m_swept=true; m_sweptLevel=m_targetLevel; break; }
+
+         if(!m_swept)
            {
-            m_targetLevel=r[iH].high; m_targetTime=r[iH].time;
-            if(!m_swept)
-               for(int k=0;k<iH;k++)
-                  if(r[k].time>=sessionStart && r[k].high>m_targetLevel)
-                    { m_swept=true; m_sweptLevel=m_targetLevel; break; }
+            int iH=-1;
+            for(int i=N;i<n-N;i++) if(IsSwingHigh(r,n,i,N)){ iH=i; break; }
+            if(iH>=0 && (m_targetLevel<=0 || r[iH].time>m_targetTime))
+              { m_targetLevel=r[iH].high; m_targetTime=r[iH].time; }
            }
+
+         datetime extFrom=(m_targetTime>0)?m_targetTime:sessionStart;
          double hi=-DBL_MAX; datetime ht=sessionStart;
-         for(int i=0;i<n;i++) if(r[i].time>=sessionStart && r[i].high>hi){ hi=r[i].high; ht=r[i].time; }
+         for(int i=0;i<n;i++) if(r[i].time>=extFrom && r[i].high>hi){ hi=r[i].high; ht=r[i].time; }
          if(hi>-DBL_MAX){ m_sweepExtreme=hi; m_sweepTime=ht; }
         }
      }
