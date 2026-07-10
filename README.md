@@ -38,7 +38,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 | **Entry window** | **Configurable minutes** from session open (default 90). |
 | **Sweep** | Price simply **takes the level** (trades beyond the prior high/low). No close-back-inside required — the *entry model* provides the reversal confirmation. |
 | **Default target** | **4%** by default, regardless of structure. Extension beyond 4% is decided by nearest high/low + momentum, capped at 10%. |
-| **Stop loss** | **At the CHoCH breaking-leg extreme** by default (`SLAnchor`) — just beyond the BOS leg. IFVG entries (no leg) and the `SWEEP_WICK` option anchor at the sweep wick instead. Optional small buffer. |
+| **Stop loss** | **At the entry pattern's own leg extreme** by default (`SLAnchor`): CHoCH → the breaking-leg extreme; IFVG → the extreme of the reclaim leg since the zone formed. The `SWEEP_WICK` option anchors at the session extreme instead. Optional small buffer. |
 | **Session caps** | Stop after **1 win**; otherwise up to **2** trades. No daily cap — next session continues normally, same day or next. |
 | **Rule 14** | EA simply never auto-closes before +4% (no manual-block logic). |
 | **TP > 10%** | Cap at 10%, always trade if valid. |
@@ -136,11 +136,15 @@ governs whether to extend *beyond* 4%.
 ## 5. Risk & sizing
 
 - **Sizing**: lots = `(Equity × 0.95%) / (|entry − SL| × tickValue)`. Never exceeds 0.95%.
-- **Stop loss** (`SLAnchor`): default **CHoCH leg** — the extreme of the breaking leg (below the
-  leg low for a buy / above the leg high for a sell), plus optional `SLBufferPoints`. This keeps
-  the stop tight behind the BOS instead of at a sweep flush that can sit much deeper. The
-  `SWEEP_WICK` option restores the old behavior (session extreme of the sweeping leg); IFVG
-  entries always use the sweep wick since they have no breaking leg.
+- **Stop loss** (`SLAnchor`): default **entry-pattern leg** — the extreme of the leg that
+  produced the entry, plus optional `SLBufferPoints`:
+  - **CHoCH** → the breaking-leg extreme (below the leg low for a buy / above the leg high
+    for a sell).
+  - **IFVG** → the extreme of the reclaim leg, i.e. the highest high (sell) / lowest low (buy)
+    since the inverted zone formed — the wick that poked the zone, not a distant session spike.
+  This keeps the stop tight behind the actual setup instead of at a sweep flush / session-open
+  spike that can sit much deeper. The `SWEEP_WICK` option restores the old behavior (session
+  extreme of the sweeping leg).
 - **Break-even**: +2% floating gain → SL to entry (rule 7).
 - **Session cap**: stop after 1 winner; else up to 2 trades; TP hit → session locked. Next session starts fresh (same or next day).
 

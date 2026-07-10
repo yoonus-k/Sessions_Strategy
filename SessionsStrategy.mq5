@@ -333,6 +333,25 @@ void ManagePending()
   }
 
 //+------------------------------------------------------------------+
+//| Extreme of the bars from 'fromT' to now (lowest low for a buy,    |
+//| highest high for a sell) — the local leg that produced the entry. |
+//+------------------------------------------------------------------+
+double LegExtremeSince(const datetime fromT,const bool isBuy)
+  {
+   MqlRates r[];
+   int n=CopyRates(_Symbol,g_s.tf,fromT,TimeCurrent(),r);
+   if(n<=0) return(0);
+   double ext=isBuy?DBL_MAX:-DBL_MAX;
+   for(int i=0;i<n;i++)
+     {
+      if(isBuy){ if(r[i].low <ext) ext=r[i].low;  }
+      else     { if(r[i].high>ext) ext=r[i].high; }
+     }
+   if(isBuy)  return(ext<DBL_MAX ?ext:0);
+   return(ext>-DBL_MAX?ext:0);
+  }
+
+//+------------------------------------------------------------------+
 //| Build & send the order for a confirmed signal                    |
 //+------------------------------------------------------------------+
 void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
@@ -342,12 +361,21 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double point =SymbolInfoDouble(_Symbol,SYMBOL_POINT);
    double buf   =g_s.slBufferPoints*point;
-   // SL anchor: the CHoCH breaking-leg extreme keeps the stop just beyond the
-   // BOS leg; the sweep wick (session extreme) can sit far deeper when the
-   // sweep flush preceded the reversal leg. IFVG has no leg -> sweep wick.
+   // SL anchor: the extreme of the ENTRY PATTERN's own leg, not the session
+   // extreme — a session-open spike can sit far away from the actual setup.
+   //  CHoCH -> breaking-leg extreme; IFVG -> extreme of the reclaim leg
+   //  (since the zone formed). SWEEP_WICK mode keeps the session extreme.
    double anchor=g_liq.SweepExtreme();
-   if(g_s.slAnchor==SL_ANCHOR_CHOCH_LEG && sig.model=="CHoCH")
-      anchor=isBuy?sig.legLo:sig.legHi;
+   if(g_s.slAnchor==SL_ANCHOR_CHOCH_LEG)
+     {
+      if(sig.model=="CHoCH")
+         anchor=isBuy?sig.legLo:sig.legHi;
+      else if(sig.model=="IFVG" && sig.zoneTime>0)
+        {
+         double ext=LegExtremeSince(sig.zoneTime,isBuy);
+         if(ext>0) anchor=ext;
+        }
+     }
    double sl    =isBuy?anchor-buf:anchor+buf;
    long   stopsLvl=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    double minDist =stopsLvl*point;

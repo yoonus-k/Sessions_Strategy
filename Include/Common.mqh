@@ -33,7 +33,7 @@ enum ENUM_ENTRY_MODEL
 //--- Where the initial stop loss is anchored
 enum ENUM_SL_ANCHOR
   {
-   SL_ANCHOR_CHOCH_LEG  = 0, // CHoCH breaking-leg extreme (IFVG falls back to sweep wick)
+   SL_ANCHOR_CHOCH_LEG  = 0, // Entry-pattern extreme (CHoCH breaking leg / IFVG reclaim leg)
    SL_ANCHOR_SWEEP_WICK = 1  // Sweep wick (session extreme of the sweeping leg)
   };
 
