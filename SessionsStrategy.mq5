@@ -46,6 +46,7 @@ input int             InpChochSwing         = 1;           // Swing strength (N)
 input ENUM_ENTRY_MODEL InpEntryModel        = ENTRY_EITHER; // Entry: CHoCH or IFVG, whichever fires first
 input double          InpChochRetrace       = 0.25;        // CHoCH limit retrace of breaking leg (0..1)
 input double          InpPreSweepHours      = 8.0;         // Look this many hours left of session open for the low/high to sweep
+input int             InpChochTimeoutBars   = 3;           // CHoCH limit: bars to wait for fill, then market fallback (0=off)
 
 input group "Risk"
 input double          InpRiskPercent        = 0.95;        // Risk per trade (% capital)
@@ -68,6 +69,8 @@ input double          InpTrailPadPoints     = 0;           // Structure-trail pa
 input group "Session caps"
 input int             InpMaxTradesPerSession= 2;           // Max trades per session
 input bool            InpStopAfterFirstWin  = true;        // Stop after first win
+input bool            InpTradeMonday        = true;        // Allow trading on Monday
+input bool            InpTradeFriday        = true;        // Allow trading on Friday
 
 input group "Logging"
 input bool            InpWriteJournal       = true;        // Write CSV journal
@@ -110,8 +113,12 @@ ulong            g_openTicket=0;      // position ticket
 long             g_openPositionId=0;  // position identifier (for history)
 ulong            g_pendingTicket=0;   // working CHoCH limit order
 string           g_pendingModel="";
+datetime         g_pendingPlacedBar=0;// bar the limit was placed on (for the market fallback)
 string           g_openSession="";
 string           g_openBias="";
+string           g_openModel="";      // entry model of the open trade (report)
+string           g_openDay="";        // Riyadh week-day the trade opened on
+double           g_openLots=0;
 string           g_lastSessionKey="";
 
 //+------------------------------------------------------------------+
@@ -154,6 +161,8 @@ void BuildSettings()
    g_s.trailPadPoints        =InpTrailPadPoints;
    g_s.maxTradesPerSession   =InpMaxTradesPerSession;
    g_s.stopAfterFirstWin     =InpStopAfterFirstWin;
+   g_s.tradeMonday           =InpTradeMonday;
+   g_s.tradeFriday           =InpTradeFriday;
    g_s.writeJournal          =InpWriteJournal;
   }
 
@@ -207,9 +216,21 @@ void RefreshDashboardLive()
    g_state.pending     =(g_pendingTicket!=0);
    if(g_state.positionOpen && PositionSelectByTicket(g_openTicket))
       g_state.floatPct=g_risk.FloatPercent(PositionGetDouble(POSITION_PROFIT));
-   if(g_state.bias==BIAS_NONE)               g_state.note="arm a bias (BUY/SELL)";
-   else if(g_state.session==SESSION_NONE)    g_state.note="armed - out of session";
-   else if(g_state.note=="arm a bias (BUY/SELL)") g_state.note="armed - evaluating on bar close";
+   // keep day / max-trades live every tick
+   MqlDateTime _drl; TimeToStruct(ToRiyadh(now,g_s),_drl);
+   g_state.dayAllowed=!(_drl.day_of_week==1 && !g_s.tradeMonday) &&
+                      !(_drl.day_of_week==5 && !g_s.tradeFriday);
+   g_state.maxTrades =g_s.maxTradesPerSession;
+   if(g_state.bias==BIAS_NONE)
+      g_state.note="arm a bias (BUY/SELL)";
+   else if(!g_state.dayAllowed)
+      g_state.note=(_drl.day_of_week==1)?"Monday trading disabled":"Friday trading disabled";
+   else if(g_state.session==SESSION_NONE)
+      g_state.note="armed - out of session";
+   else if(g_state.note=="arm a bias (BUY/SELL)" ||
+           g_state.note=="Monday trading disabled" ||
+           g_state.note=="Friday trading disabled")
+      g_state.note="armed - evaluating on bar close";
    if(InpShowDashboard) g_dash.Update(g_state);
   }
 
@@ -260,7 +281,10 @@ void CheckClosedPosition()
      }
    bool win=(total>0);
    g_risk.RegisterClose(win);
-   g_journal.LogClose(g_openTicket,closeTime,exit,total,g_risk.FloatPercent(total));
+   g_journal.LogTrade(g_openDay,closeTime,g_openSession,g_openBias,g_openModel,
+                      g_openLots,total,AccountInfoDouble(ACCOUNT_BALANCE));
+   PrintFormat("[SS] POSITION CLOSED: %I64u exit %.2f, P/L %.2f (%.2f%%) -> %s",
+               g_openTicket,exit,total,g_risk.FloatPercent(total),win?"WIN":"LOSS");
 
    g_openTicket=0; g_openPositionId=0;
    g_dtp.Clear();
@@ -271,7 +295,11 @@ void CheckClosedPosition()
 //+------------------------------------------------------------------+
 void OnPositionOpened(const ulong posTicket,const string model)
   {
-   if(!PositionSelectByTicket(posTicket)) return;
+   if(!PositionSelectByTicket(posTicket))
+     {
+      PrintFormat("[SS] WARNING: position %I64u not found after open - tracking failed",posTicket);
+      return;
+     }
    g_openTicket    =posTicket;
    g_openPositionId=(long)PositionGetInteger(POSITION_IDENTIFIER);
    bool   isBuy=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY);
@@ -282,14 +310,21 @@ void OnPositionOpened(const ulong posTicket,const string model)
    ENUM_SESSION ses=g_session.CurrentSession(now);
    g_openSession=(ses==SESSION_ASIA)?"ASIA":(ses==SESSION_NY)?"NY":"-";
    g_openBias   =isBuy?"BUY":"SELL";
+   g_openModel  =model;
+   g_openDay    =DayOfWeekName(ToRiyadh(now,g_s)); // same day base as the Mon/Fri filter
+   g_openLots   =lots;
 
    g_risk.RegisterOpen();
    g_dtp.OnNewTrade(g_openTicket,isBuy,entry);
-   g_journal.LogOpen(g_openTicket,now,g_openSession,g_openBias,model,lots,entry,sl);
 
    double tp=PositionGetDouble(POSITION_TP);
    g_visuals.DrawTrade(TimeToString(now,TIME_DATE|TIME_MINUTES)+"_"+(string)posTicket,
                        isBuy,entry,sl,tp,now);
+
+   PrintFormat("[SS] POSITION OPENED: %s %s %.2f lots @ %.2f, SL %.2f, TP %.2f (model %s, session %s)",
+               g_openBias,_Symbol,lots,entry,sl,tp,model,g_openSession);
+   Alert(StringFormat("SS: OPENED %s %.2f lots @ %.2f, SL %.2f (%s)",
+                      g_openBias,lots,entry,sl,model));
 
    g_liq.Reset(); // next trade needs a fresh sweep
   }
@@ -310,8 +345,28 @@ void ManagePending()
       // rule 3: no fill allowed past the entry window; also drop if bias changed
       if(!g_session.InEntryWindow(now) || !biasOK)
         {
+         PrintFormat("[SS] LIMIT %I64u CANCELLED: %s (never filled)",
+                     g_pendingTicket,!biasOK?"bias changed":"entry window closed");
          g_trade.OrderDelete(g_pendingTicket);
-         g_pendingTicket=0; g_pendingModel="";
+         g_pendingTicket=0; g_pendingModel=""; g_pendingPlacedBar=0;
+         return;
+        }
+      // momentum fallback: still unfilled after N bars means price never
+      // pulled back to the retrace level (displacement move) -> chase it
+      // with a MARKET entry using the same SL anchor, resized to the risk %
+      if(InpChochTimeoutBars>0 && g_pendingPlacedBar>0)
+        {
+         int elapsed=(int)((iTime(_Symbol,g_s.tf,0)-g_pendingPlacedBar)/PeriodSeconds(g_s.tf));
+         if(elapsed>=InpChochTimeoutBars)
+           {
+            double sl=OrderGetDouble(ORDER_SL);
+            string model=g_pendingModel;
+            PrintFormat("[SS] LIMIT %I64u NOT FILLED after %d bars (no pullback) -> switching to MARKET entry",
+                        g_pendingTicket,elapsed);
+            g_trade.OrderDelete(g_pendingTicket);
+            g_pendingTicket=0; g_pendingModel=""; g_pendingPlacedBar=0;
+            OpenMarket(wantBuy,sl,model);
+           }
         }
       return;
      }
@@ -329,7 +384,7 @@ void ManagePending()
            { OnPositionOpened(t,g_pendingModel); break; }
         }
      }
-   g_pendingTicket=0; g_pendingModel="";
+   g_pendingTicket=0; g_pendingModel=""; g_pendingPlacedBar=0;
   }
 
 //+------------------------------------------------------------------+
@@ -349,6 +404,54 @@ double LegExtremeSince(const datetime fromT,const bool isBuy)
      }
    if(isBuy)  return(ext<DBL_MAX ?ext:0);
    return(ext>-DBL_MAX?ext:0);
+  }
+
+//+------------------------------------------------------------------+
+//| Market entry with a given SL: clamp, size, send, register.        |
+//| Prints an English journal line on success or failure.             |
+//+------------------------------------------------------------------+
+bool OpenMarket(const bool isBuy,double sl,const string model)
+  {
+   double bid  =SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask  =SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double point=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   double minDist=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*point;
+   double entry=isBuy?ask:bid;
+
+   if(isBuy && entry-sl<minDist) sl=entry-minDist;
+   if(!isBuy&& sl-entry<minDist) sl=entry+minDist;
+   if((isBuy && sl>=entry) || (!isBuy && sl<=entry))
+     {
+      PrintFormat("[SS] MARKET SKIPPED (%s %s): invalid SL %.2f vs entry %.2f",
+                  model,isBuy?"BUY":"SELL",sl,entry);
+      return(false);
+     }
+
+   double lots=g_risk.LotForRisk(entry,sl);
+   if(lots<=0)
+     {
+      PrintFormat("[SS] MARKET SKIPPED (%s %s): lot size = 0 (SL distance %.2f)",
+                  model,isBuy?"BUY":"SELL",MathAbs(entry-sl));
+      return(false);
+     }
+   double tp=g_risk.PriceForPercent(g_s.maxTargetPercent,lots,isBuy,entry);
+
+   bool ok=isBuy ? g_trade.Buy (lots,_Symbol,entry,sl,tp,"SS "+model)
+                 : g_trade.Sell(lots,_Symbol,entry,sl,tp,"SS "+model);
+   if(!ok)
+     {
+      PrintFormat("[SS] MARKET %s FAILED (%s): retcode=%d %s",
+                  isBuy?"BUY":"SELL",model,
+                  g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
+      Alert(StringFormat("SS: MARKET %s FAILED - %s",
+                         isBuy?"BUY":"SELL",g_trade.ResultRetcodeDescription()));
+      return(false);
+     }
+   ulong deal=g_trade.ResultDeal();
+   long posId=0;
+   if(HistoryDealSelect(deal)) posId=(long)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+   OnPositionOpened((ulong)posId,model);
+   return(true);
   }
 
 //+------------------------------------------------------------------+
@@ -387,44 +490,49 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
       entry=sig.price;
       if(isBuy && entry>=ask) useLimit=false; // price already past retrace -> market
       if(!isBuy&& entry<=bid) useLimit=false;
+      if(!useLimit)
+         PrintFormat("[SS] %s: price already beyond the retrace level %.2f -> MARKET entry",
+                     sig.model,sig.price);
      }
-   if(!useLimit) entry=isBuy?ask:bid;
+   if(!useLimit){ OpenMarket(isBuy,sl,sig.model); return; }
 
-   if(useLimit)
-     {
-      if(isBuy && ask-entry<minDist) entry=ask-minDist;
-      if(!isBuy&& entry-bid<minDist) entry=bid+minDist;
-     }
-
+   if(isBuy && ask-entry<minDist) entry=ask-minDist;
+   if(!isBuy&& entry-bid<minDist) entry=bid+minDist;
    if(isBuy && entry-sl<minDist) sl=entry-minDist;
    if(!isBuy&& sl-entry<minDist) sl=entry+minDist;
-   if((isBuy && sl>=entry) || (!isBuy && sl<=entry)){ PrintFormat("skip: invalid SL"); return; }
+   if((isBuy && sl>=entry) || (!isBuy && sl<=entry))
+     {
+      PrintFormat("[SS] LIMIT SKIPPED (%s %s): invalid SL %.2f vs entry %.2f",
+                  sig.model,isBuy?"BUY":"SELL",sl,entry);
+      return;
+     }
 
    double lots=g_risk.LotForRisk(entry,sl);
-   if(lots<=0){ PrintFormat("skip: lots=0"); return; }
-
+   if(lots<=0)
+     {
+      PrintFormat("[SS] LIMIT SKIPPED (%s %s): lot size = 0 (SL distance %.2f)",
+                  sig.model,isBuy?"BUY":"SELL",MathAbs(entry-sl));
+      return;
+     }
    double tp=g_risk.PriceForPercent(g_s.maxTargetPercent,lots,isBuy,entry);
 
-   if(useLimit)
+   bool ok=isBuy
+           ? g_trade.BuyLimit (lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model)
+           : g_trade.SellLimit(lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model);
+   if(!ok)
      {
-      bool ok=isBuy
-              ? g_trade.BuyLimit (lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model)
-              : g_trade.SellLimit(lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model);
-      if(!ok){ PrintFormat("Limit failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription()); return; }
-      g_pendingTicket=g_trade.ResultOrder();
-      g_pendingModel =sig.model;
-      PrintFormat("CHoCH %s limit @ %.2f (SL %.2f)",isBuy?"BUY":"SELL",entry,sl);
+      PrintFormat("[SS] LIMIT %s FAILED (%s): retcode=%d %s",
+                  isBuy?"BUY":"SELL",sig.model,
+                  g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
+      Alert(StringFormat("SS: LIMIT %s FAILED - %s",
+                         isBuy?"BUY":"SELL",g_trade.ResultRetcodeDescription()));
+      return;
      }
-   else
-     {
-      bool ok=isBuy ? g_trade.Buy (lots,_Symbol,entry,sl,tp,"SS "+sig.model)
-                    : g_trade.Sell(lots,_Symbol,entry,sl,tp,"SS "+sig.model);
-      if(!ok){ PrintFormat("Order failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription()); return; }
-      ulong deal=g_trade.ResultDeal();
-      long posId=0;
-      if(HistoryDealSelect(deal)) posId=(long)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
-      OnPositionOpened((ulong)posId,sig.model);
-     }
+   g_pendingTicket=g_trade.ResultOrder();
+   g_pendingModel =sig.model;
+   g_pendingPlacedBar=iTime(_Symbol,g_s.tf,0);
+   PrintFormat("[SS] %s %s LIMIT PLACED @ %.2f (SL %.2f, %.2f lots) - waiting for pullback fill",
+               sig.model,isBuy?"BUY":"SELL",entry,sl,lots);
   }
 
 //+------------------------------------------------------------------+
@@ -446,6 +554,12 @@ void EvaluateAndAct(const datetime now)
    string sk=g_session.SessionKey(now); // session change handled in OnTick
    g_risk.SyncSession(sk);
    st.trades=g_risk.Trades(); st.wins=g_risk.Wins(); st.canOpen=g_risk.CanOpen();
+   st.maxTrades=g_s.maxTradesPerSession;
+   MqlDateTime _dtw; TimeToStruct(ToRiyadh(now,g_s),_dtw);
+   st.dayAllowed=!(_dtw.day_of_week==1 && !g_s.tradeMonday) &&
+                 !(_dtw.day_of_week==5 && !g_s.tradeFriday);
+   string dayDisabledNote=(_dtw.day_of_week==1 && !g_s.tradeMonday)?"Monday trading disabled":
+                          (_dtw.day_of_week==5 && !g_s.tradeFriday)?"Friday trading disabled":"";
 
    if(st.positionOpen && PositionSelectByTicket(g_openTicket))
       st.floatPct=g_risk.FloatPercent(PositionGetDouble(POSITION_PROFIT));
@@ -488,7 +602,7 @@ void EvaluateAndAct(const datetime now)
 
    bool gateAsia=(st.session!=SESSION_ASIA) || (st.rangeValid && st.rangeExited);
    bool canAttempt = st.bias!=BIAS_NONE && st.session!=SESSION_NONE && st.inWindow
-                     && g_openTicket==0 && g_pendingTicket==0 && st.canOpen && gateAsia;
+                     && g_openTicket==0 && g_pendingTicket==0 && st.canOpen && gateAsia && st.dayAllowed;
 
    if(canAttempt && st.swept && haveSig)
      {
@@ -504,6 +618,7 @@ void EvaluateAndAct(const datetime now)
       else if(st.pending)                                    st.note="limit pending";
       else if(st.session==SESSION_NONE)                      st.note="out of session";
       else if(!st.canOpen)                                   st.note="session cap reached";
+      else if(!st.dayAllowed)                                st.note=dayDisabledNote;
       else if(st.session==SESSION_ASIA && !st.rangeValid)    st.note="Asia 4H range n/a";
       else if(st.session==SESSION_ASIA && !st.rangeExited)   st.note="Asia: range not exited yet";
       else if(!st.inWindow)                                  st.note="entry window closed";

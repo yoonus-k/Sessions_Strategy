@@ -38,6 +38,8 @@ private:
    string YN(const bool b) const { return(b?"YES":"no"); }
    string Px(const double p) const { return(p>0?DoubleToString(p,m_digits):"-"); }
 
+   // day name comes from the shared DayOfWeekName() helper in Common.mqh
+
 public:
    void Init(const long chart_id,const string symbol)
      {
@@ -90,15 +92,17 @@ public:
                           :"waiting";
       Label(5,"Entry model : "+em,s.entryMet?cGood:cWait);
 
-      Label(6,"Trades      : "+(string)s.trades+"   Wins: "+(string)s.wins
-            +"   CanOpen: "+YN(s.canOpen),s.canOpen?cInfo:cBad);
+      Label(6,"Trades      : "+(string)s.trades+"/"+(string)s.maxTrades
+            +"  Wins: "+(string)s.wins+"  Day: "+(s.dayAllowed?"OK":"OFF"),
+            (s.canOpen && s.dayAllowed)?cInfo:cBad);
 
       string pos=s.positionOpen?StringFormat("OPEN  %.2f%%",s.floatPct):"none";
       Label(7,"Position    : "+pos+(s.pending?"   [LIMIT pending]":""),
             s.positionOpen?cGood:cInfo);
 
       Label(8,"Note        : "+s.note,cInfo);
-      Label(9,"Server "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES),clrGray);
+      Label(9,DayOfWeekName(TimeCurrent())+"  "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES)
+            +"  (server)",clrSilver);
 
       ChartRedraw(m_chart);
      }

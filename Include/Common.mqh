@@ -86,6 +86,8 @@ struct SSettings
    // Caps
    int               maxTradesPerSession;     // 2
    bool              stopAfterFirstWin;       // true
+   bool              tradeMonday;             // allow trading on Monday
+   bool              tradeFriday;             // allow trading on Friday
    // Logging
    bool              writeJournal;
   };
@@ -112,6 +114,8 @@ struct SStratState
    int          trades;
    int          wins;
    bool         canOpen;
+   int          maxTrades;
+   bool         dayAllowed;
    bool         positionOpen;
    double       floatPct;
    bool         pending;
@@ -142,6 +146,16 @@ int RiyadhMinuteOfDay(const datetime riyadhTime)
    MqlDateTime dt;
    TimeToStruct(riyadhTime,dt);
    return(dt.hour*60+dt.min);
+  }
+
+//+------------------------------------------------------------------+
+//| English week-day name of a given time                            |
+//+------------------------------------------------------------------+
+string DayOfWeekName(const datetime t)
+  {
+   string names[7]={"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+   MqlDateTime dt; TimeToStruct(t,dt);
+   return(names[dt.day_of_week]);
   }
 
 #endif // SESSIONS_STRATEGY_COMMON_MQH
