@@ -245,9 +245,14 @@ public:
          case ENTRY_CHOCH_ONLY: if(ca){ sig=a; return(true);} break;
          case ENTRY_IFVG_ONLY:  if(cb){ sig=b; return(true);} break;
          case ENTRY_CHOCH_FIRST:
-         case ENTRY_EITHER:
             if(ca){ sig=a; return(true);}
             if(cb){ sig=b; return(true);}
+            break;
+         case ENTRY_EITHER:
+            // same-bar tie -> the IFVG (gap) outranks the CHoCH: it is a
+            // market entry at a confirmed rejection, no pullback needed
+            if(cb){ sig=b; return(true);}
+            if(ca){ sig=a; return(true);}
             break;
         }
       return(false);

@@ -120,7 +120,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
   - Stop loss still sits at the **sweep wick**; lot size is computed from the limit price → SL.
 
 ### 4.4 IFVG — Inverse Fair Value Gap (secondary trigger)
-- A **FVG** is a 3-candle imbalance; an **IFVG** forms when an existing FVG is traded through and closed beyond (invalidated), flipping into opposite S/R. Entry on a close-confirmed reaction from the inverted zone. First valid trigger after the sweep wins.
+- A **FVG** is a 3-candle imbalance; an **IFVG** forms when an existing FVG is traded through and closed beyond (invalidated), flipping into opposite S/R. Entry on a close-confirmed reaction from the inverted zone. First valid trigger after the sweep wins — and **if a CHoCH and an IFVG fire on the same candle (`EntryModel = EITHER`), the IFVG takes priority** (it is an immediate market entry at a confirmed rejection, no pullback needed).
 
 ### 4.5 Entry sequence (per session)
 ```

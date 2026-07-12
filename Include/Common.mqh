@@ -24,10 +24,10 @@ enum ENUM_SESSION
 //--- Entry confirmation model selection
 enum ENUM_ENTRY_MODEL
   {
-   ENTRY_CHOCH_FIRST = 0, // CHoCH primary, IFVG fallback (default)
+   ENTRY_CHOCH_FIRST = 0, // CHoCH primary, IFVG fallback
    ENTRY_CHOCH_ONLY  = 1,
    ENTRY_IFVG_ONLY   = 2,
-   ENTRY_EITHER      = 3  // whichever fires first
+   ENTRY_EITHER      = 3  // whichever fires first; same-bar tie -> IFVG wins
   };
 
 //--- Where the initial stop loss is anchored
