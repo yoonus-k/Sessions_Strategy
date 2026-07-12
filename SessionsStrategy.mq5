@@ -46,7 +46,6 @@ input int             InpChochSwing         = 1;           // Swing strength (N)
 input ENUM_ENTRY_MODEL InpEntryModel        = ENTRY_EITHER; // Entry: CHoCH or IFVG, whichever fires first
 input double          InpChochRetrace       = 0.25;        // CHoCH limit retrace of breaking leg (0..1)
 input double          InpPreSweepHours      = 8.0;         // Look this many hours left of session open for the low/high to sweep
-input int             InpChochTimeoutBars   = 3;           // CHoCH limit: bars to wait for fill, then market fallback (0=off)
 
 input group "Risk"
 input double          InpRiskPercent        = 0.95;        // Risk per trade (% capital)
@@ -113,7 +112,9 @@ ulong            g_openTicket=0;      // position ticket
 long             g_openPositionId=0;  // position identifier (for history)
 ulong            g_pendingTicket=0;   // working CHoCH limit order
 string           g_pendingModel="";
-datetime         g_pendingPlacedBar=0;// bar the limit was placed on (for the market fallback)
+SEntrySignal     g_lastBos;           // newest confirmed BOS (the "liquidity")
+datetime         g_pendingBasisTime=0;// structTime of the BOS the limit sits on
+int              g_bosCount=0;        // BOS counter for the current pending cycle
 string           g_openSession="";
 string           g_openBias="";
 string           g_openModel="";      // entry model of the open trade (report)
@@ -326,6 +327,7 @@ void OnPositionOpened(const ulong posTicket,const string model)
    Alert(StringFormat("SS: OPENED %s %.2f lots @ %.2f, SL %.2f (%s)",
                       g_openBias,lots,entry,sl,model));
 
+   g_bosCount=0; g_pendingBasisTime=0; // BOS-trailing cycle ends on fill
    g_liq.Reset(); // next trade needs a fresh sweep
   }
 
@@ -348,26 +350,12 @@ void ManagePending()
          PrintFormat("[SS] LIMIT %I64u CANCELLED: %s (never filled)",
                      g_pendingTicket,!biasOK?"bias changed":"entry window closed");
          g_trade.OrderDelete(g_pendingTicket);
-         g_pendingTicket=0; g_pendingModel=""; g_pendingPlacedBar=0;
-         return;
+         g_pendingTicket=0; g_pendingModel="";
+         g_bosCount=0; g_pendingBasisTime=0;
         }
-      // momentum fallback: still unfilled after N bars means price never
-      // pulled back to the retrace level (displacement move) -> chase it
-      // with a MARKET entry using the same SL anchor, resized to the risk %
-      if(InpChochTimeoutBars>0 && g_pendingPlacedBar>0)
-        {
-         int elapsed=(int)((iTime(_Symbol,g_s.tf,0)-g_pendingPlacedBar)/PeriodSeconds(g_s.tf));
-         if(elapsed>=InpChochTimeoutBars)
-           {
-            double sl=OrderGetDouble(ORDER_SL);
-            string model=g_pendingModel;
-            PrintFormat("[SS] LIMIT %I64u NOT FILLED after %d bars (no pullback) -> switching to MARKET entry",
-                        g_pendingTicket,elapsed);
-            g_trade.OrderDelete(g_pendingTicket);
-            g_pendingTicket=0; g_pendingModel=""; g_pendingPlacedBar=0;
-            OpenMarket(wantBuy,sl,model);
-           }
-        }
+      // NOTE: no time-based market fallback here. Per the BOS-trailing rule
+      // the limit WAITS on its BOS no matter how far price runs; only a new
+      // BOS (TrailPendingOnNewBos) or the window end can move/cancel it.
       return;
      }
 
@@ -384,7 +372,50 @@ void ManagePending()
            { OnPositionOpened(t,g_pendingModel); break; }
         }
      }
-   g_pendingTicket=0; g_pendingModel=""; g_pendingPlacedBar=0;
+   g_pendingTicket=0; g_pendingModel="";
+   g_bosCount=0; g_pendingBasisTime=0;
+  }
+
+//+------------------------------------------------------------------+
+//| BOS trailing: while a CHoCH limit is pending, keep detecting new  |
+//| structure breaks. The limit always sits on the SECOND-NEWEST BOS: |
+//| BOS #2 keeps the order on BOS #1; from BOS #3 on, the order moves |
+//| up to the previous newest BOS. The newest BOS is the liquidity.   |
+//+------------------------------------------------------------------+
+void TrailPendingOnNewBos(const datetime now)
+  {
+   if(g_pendingTicket==0 || g_openTicket!=0) return;
+   ENUM_BIAS bias=g_panel.Bias();
+   if(bias==BIAS_NONE) return;
+   ENUM_SESSION ses=g_session.CurrentSession(now);
+   if(ses==SESSION_NONE || !g_session.InEntryWindow(now)) return;
+
+   g_entry.SetWindow(g_session.SessionStartServer(now));
+   SEntrySignal sig;
+   if(!g_entry.CheckCHoCH(bias,sig)) return;
+   if(sig.structTime==g_lastBos.structTime) return;   // same BOS, nothing new
+
+   g_bosCount++;
+   PrintFormat("[SS] NEW BOS #%d (struct %.2f) - newest BOS is now the liquidity",
+               g_bosCount,sig.structLevel);
+
+   // from BOS #3 on: lift the limit up to the previous newest BOS
+   if(g_lastBos.valid && g_lastBos.structTime!=g_pendingBasisTime)
+     {
+      SEntrySignal basis=g_lastBos;
+      PrintFormat("[SS] MOVING pending limit to BOS @ struct %.2f (retrace %.2f)",
+                  basis.structLevel,basis.price);
+      g_trade.OrderDelete(g_pendingTicket);
+      g_pendingTicket=0; g_pendingModel="";
+      PlaceOrder(bias,basis);        // re-place (market fallback if already past)
+      if(g_pendingTicket!=0) g_pendingBasisTime=basis.structTime;
+     }
+   g_lastBos=sig;
+
+   // draw the newest BOS leg (the liquidity being built)
+   g_visuals.DrawChoch(TimeToString(now,TIME_DATE|TIME_MINUTES),bias==BIAS_BUY,
+                       sig.legLoTime,sig.legLo,sig.legHiTime,sig.legHi,
+                       sig.structTime,sig.structLevel,sig.price,now);
   }
 
 //+------------------------------------------------------------------+
@@ -530,7 +561,6 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
      }
    g_pendingTicket=g_trade.ResultOrder();
    g_pendingModel =sig.model;
-   g_pendingPlacedBar=iTime(_Symbol,g_s.tf,0);
    PrintFormat("[SS] %s %s LIMIT PLACED @ %.2f (SL %.2f, %.2f lots) - waiting for pullback fill",
                sig.model,isBuy?"BUY":"SELL",entry,sl,lots);
   }
@@ -610,6 +640,11 @@ void EvaluateAndAct(const datetime now)
       st.note="ORDER SENT: "+sig.model;
       st.pending=(g_pendingTicket!=0);
       st.positionOpen=(g_openTicket!=0);
+      if(g_pendingTicket!=0)
+        {                    // start a BOS-trailing cycle for this limit
+         g_pendingBasisTime=sig.structTime;
+         g_lastBos=sig; g_bosCount=1;
+        }
      }
    else
      {
@@ -773,11 +808,19 @@ void OnTick()
       // it persists and the Asia session reuses the same object key
       UpdateRangeBox(now);
 
-      // While a trade or pending order is live, do NOT run detection or draw
-      // new setups — just manage the open position (rule 14 focus).
+      // While a trade or pending order is live, do NOT run full detection —
+      // manage the position (rule 14 focus). A pending CHoCH limit still
+      // tracks new BOS breaks and trails to the second-newest one.
       if(g_openTicket!=0 || g_pendingTicket!=0)
         {
-         g_state.note=(g_openTicket!=0)?"managing position":"limit pending";
+         if(g_openTicket==0)
+            TrailPendingOnNewBos(now);
+         if(g_openTicket!=0)
+            g_state.note="managing position";
+         else if(g_pendingTicket!=0)
+            g_state.note=(g_bosCount>1)
+                         ?StringFormat("limit pending (BOS %d, order on prev BOS)",g_bosCount)
+                         :"limit pending";
         }
       else
         {

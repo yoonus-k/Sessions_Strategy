@@ -112,10 +112,11 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
   - Order **expires at the end of the entry window** (rule 3); if unfilled it is cancelled. If
     price has already retraced past the level by the time of the signal, the EA falls back to a
     market entry at current price.
-  - **Momentum fallback (`ChochTimeoutBars`, default 3)**: if the limit is still unfilled after
-    N bars — a displacement move that never pulls back — the limit is deleted and replaced by a
-    **market entry** with the same SL anchor (lots resized to keep the 0.95% risk). Set 0 to
-    disable and wait for the window end as before.
+  - **BOS trailing**: while the limit is pending, new structure breaks keep being detected. The
+    order always sits on the **second-newest BOS** — BOS #2 keeps the order on BOS #1; from
+    BOS #3 on, the order is lifted to the previous newest BOS, and so on. The newest BOS is
+    treated as the liquidity being built; the order's price, SL and lots are recomputed from
+    the BOS it moves to. The dashboard shows `limit pending (BOS n, order on prev BOS)`.
   - Stop loss still sits at the **sweep wick**; lot size is computed from the limit price → SL.
 
 ### 4.4 IFVG — Inverse Fair Value Gap (secondary trigger)
@@ -221,7 +222,6 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | Entry | `EntryModel` | CHoCH-first | CHoCH / IFVG / either |
 | Entry | `ChochRetrace` | 0.25 | Limit at 25% retrace of breaking leg |
 | Entry | `PreSweepHours` | 8.0 | Hours left of session open to find the low/high to sweep |
-| Entry | `ChochTimeoutBars` | 3 | Unfilled CHoCH limit → market entry after N bars (0 = wait to window end) |
 | Risk | `RiskPercent` | 0.95 | Rule 9 |
 | Risk | `SLAnchor` | CHoCH leg | SL at breaking-leg extreme (CHoCH) or sweep wick |
 | Risk | `SLBufferPoints` | 0 | Pad beyond anchor |
@@ -366,9 +366,9 @@ Sessions are in **Riyadh time (GMT+3)**. The EA needs your broker's **server-tim
 - **Boxes at the wrong hours** → fix `BrokerToRiyadhHr` (Step B).
 - **No trades** → bias not armed (panel still `NONE` and `ForcedBias = NONE`), or no setup met the
   sweep + CHoCH/IFVG conditions in the entry window. The Tester Journal and the chart marks tell you which.
-- **`ChochRetrace` fills** → if a CHoCH limit never fills, price didn't retrace 25% within
-  `ChochTimeoutBars` bars; the EA then chases with a market entry (set `ChochTimeoutBars = 0` to
-  disable). Lower `ChochRetrace` toward 0 for shallower (more frequent) limit fills.
+- **`ChochRetrace` fills** → a CHoCH limit that never fills waits on its BOS (per the BOS-trailing
+  rule) until a newer BOS lifts it or the entry window closes. Lower `ChochRetrace` toward 0 for
+  shallower (more frequent) limit fills.
 - **Every order decision is logged in English** in the Experts/Journal tab with the `[SS]` prefix:
   `LIMIT PLACED`, `POSITION OPENED`, `LIMIT NOT FILLED ... switching to MARKET`, `LIMIT CANCELLED`,
   `MARKET/LIMIT ... FAILED: retcode`, `SKIPPED (invalid SL / lot size = 0)`, `POSITION CLOSED`.
