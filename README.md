@@ -51,7 +51,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 | # | Rule (charter) | EA implementation |
 |---|----------------|-------------------|
 | 1 | **Approved sessions** — Asia 03:00–06:00, NY 15:00–18:00 | Two windows in **Riyadh time**. |
-| 2 | **Asia condition** — price must exit the prior 4-hour range | The range = High/Low of the **last 4 hours of the previous day** (the 4h ending at the day's close). Before an Asia entry, price must have traded **outside** that range. |
+| 2 | **Asia condition** — price must exit the prior 4-hour range | The range box (last 4h of the previous day) is **drawn for reference only**, confined to its own 4 hours. The breakout check is the **trader's manual job** — the EA does not gate entries on it. |
 | 3 | **Entry timing** — only within the first ~1.5 hours | Hard gate via input `EntryWindowMinutes` (default 90). No entry after. |
 | 4 | **Sell** — sweep prior **highs** first | SELL requires price to trade **above** the nearest prior swing high. |
 | 5 | **Buy** — sweep prior **lows** first | BUY requires price to trade **below** the nearest prior swing low. |
@@ -89,9 +89,11 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 - **One position at a time**: while a trade or a pending CHoCH limit is live, the EA **stops all
   detection and setup drawing** and only manages the open position.
 
-### 4.2 Asia previous-day 4h range (rule 2)
+### 4.2 Asia previous-day 4h range (rule 2) — reference drawing only
 - Computed once per day: **High/Low of the last 4 hours of the previous day**, i.e. the 4-hour window ending at the configured day-close time (`DayCloseHourRiyadh`).
-- An Asia-session entry is allowed only after price has traded **outside** that High/Low.
+- The box is drawn **strictly over its own 4 hours** (it never extends into the Asia session, no
+  projected rays). Whether price exited it is checked **manually by the trader** — the EA does
+  not use it as an entry condition; arming a bias starts the setup hunt immediately.
 
 ### 4.3 CHoCH — Change of Character (primary trigger, LIMIT entry)
 - The first structural break against the short-term micro-trend after the sweep.
@@ -125,13 +127,13 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 ### 4.5 Entry sequence (per session)
 ```
 1. Session open → bias set (BUY/SELL)?                ──no──► idle
-2. (Asia only) price exited prior-day last-4h range?  ──no──► wait
-3. Within EntryWindowMinutes of open?                 ──no──► lock session
-4. Nearest opposing high/low taken (sweep)?           ──no──► wait
-5. CHoCH or IFVG fires on candle close?               ──no──► wait
-6a. CHoCH → place LIMIT at 25% retrace of breaking leg (expires at window end)
-6b. IFVG  → enter at market
-7. On fill → size 0.95% risk, SL at wick, TP cap 10%, arm dynamic runner
+   (rule-2 4H-range breakout is checked MANUALLY before arming the bias)
+2. Within EntryWindowMinutes of open?                 ──no──► lock session
+3. Nearest opposing high/low taken (sweep)?           ──no──► wait
+4. CHoCH or IFVG fires on candle close?               ──no──► wait
+5a. CHoCH → place LIMIT at 25% retrace of breaking leg (BOS trailing rules)
+5b. IFVG  → enter at market
+6. On fill → size 0.95% risk, SL at pattern leg, TP cap 10%, arm dynamic runner
 ```
 There is **no "structural target ≥ 4%" gate** — the default target is always 4%; structure only
 governs whether to extend *beyond* 4%.
@@ -253,7 +255,8 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 ### Chart legend (what gets drawn)
 - **Dashboard panel** (top-left) — live state: bias, session, entry window, 4H range + values,
   sweep met?, entry model met?, trade count/caps, position P/L, and a "what's blocking" note.
-- **Prev-Day 4H** (gold, **outline only**) — the rule-2 range with dotted high/low rays.
+- **Prev-Day 4H** (gold, **outline only**) — the rule-2 range box, confined to its own 4 hours
+  (no rays, never extends into Asia). Reference for the trader's manual breakout check.
 - **ASIA / NY boxes** (blue / red, **outline only**) — developing session high–low (no fill, so it no longer covers the candles).
 - **Swing dots** (tomato highs / green lows) — the structure skeleton.
 - **Sweep target** (gold `low to sweep` → khaki `low SWEPT`) — the single marked level, trailing to the newest swing.
@@ -263,7 +266,7 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 - **Trade** — entry (silver), SL (red), TP (green) rays + an up/down arrow at the fill.
 
 > **Debugging "no trades":** read the dashboard **Note** line — it names the first unmet condition
-> (e.g. *waiting liquidity sweep*, *Asia: range not exited yet*, *entry window closed*). That tells
+> (e.g. *waiting liquidity sweep*, *entry window closed*). That tells
 > you exactly which gate is stopping entries.
 
 ---

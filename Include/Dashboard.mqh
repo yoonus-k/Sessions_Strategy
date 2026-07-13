@@ -77,13 +77,9 @@ public:
       Label(2,"Session     : "+ses+"   Window: "+YN(s.inWindow),
             s.session==SESSION_NONE?cInfo:(s.inWindow?cGood:cWait));
 
-      if(s.session==SESSION_ASIA)
-         Label(3,"4H Range    : "+(s.rangeValid?Px(s.rangeLo)+" / "+Px(s.rangeHi):"n/a")
-               +"  Exit:"+YN(s.rangeExited),
-               s.rangeValid?(s.rangeExited?cGood:cWait):cBad);
-      else
-         Label(3,"4H Range    : "+(s.rangeValid?Px(s.rangeLo)+" / "+Px(s.rangeHi):"n/a")
-               +"  (Asia only)",cInfo);
+      // 4H range values are reference only - the breakout check is manual
+      Label(3,"4H Range    : "+(s.rangeValid?Px(s.rangeLo)+" / "+Px(s.rangeHi):"n/a")
+            +"  (manual check)",cInfo);
 
       Label(4,"Sweep       : "+(s.swept?"MET @"+Px(s.sweptLevel):"waiting"),
             s.swept?cGood:cWait);

@@ -255,12 +255,11 @@ public:
       // keyed by the close day so the live build box and the Asia-session
       // redraw share one object (seamless hand-off, no duplicate).
       string tag=DayTag(endSrv);
-      // right edge follows the caller: 'now' while building, session-end in Asia
-      datetime right=(projectTo>startSrv)?projectTo:endSrv;
-      // outline only + dotted high/low rays (no heavy fill)
+      // right edge follows the caller: 'now' while building, range-end after.
+      // Box only, confined to the 4h window itself - no projected rays, the
+      // breakout check against it is the trader's manual job.
+      datetime right=(projectTo>startSrv && projectTo<endSrv)?projectTo:endSrv;
       EnsureRect(VIS_PREFIX+"R_"+tag,startSrv,hi,right,lo,m_colRange,false);
-      EnsureLine(VIS_PREFIX+"RH_"+tag,startSrv,hi,right,m_colRange);
-      EnsureLine(VIS_PREFIX+"RL_"+tag,startSrv,lo,right,m_colRange);
       EnsureText(VIS_PREFIX+"RT_"+tag,startSrv,hi,"Prev-Day 4H",m_colRange);
      }
 

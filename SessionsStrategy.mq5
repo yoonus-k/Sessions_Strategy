@@ -600,9 +600,6 @@ void EvaluateAndAct(const datetime now)
    datetime ss=(st.session!=SESSION_NONE)?g_session.SessionStartServer(now):0;
    g_entry.SetWindow(ss);
 
-   if(st.session==SESSION_ASIA && st.rangeValid)
-      st.rangeExited=g_session.AsiaRangeExited(ss);
-
    // sweep + entry evaluated whenever armed & in session (for the dashboard),
    // independent of the entry window
    SEntrySignal sig; bool haveSig=false;
@@ -630,9 +627,11 @@ void EvaluateAndAct(const datetime now)
          g_visuals.DrawIFVG(sigKey,sig.zoneTime,now,sig.zoneLo,sig.zoneHi);
      }
 
-   bool gateAsia=(st.session!=SESSION_ASIA) || (st.rangeValid && st.rangeExited);
+   // NOTE: the prior-day 4H range is drawn for REFERENCE only; whether price
+   // broke out of it is the trader's MANUAL check (rule 2) - the code does
+   // not gate entries on it. Arming a bias starts the hunt immediately.
    bool canAttempt = st.bias!=BIAS_NONE && st.session!=SESSION_NONE && st.inWindow
-                     && g_openTicket==0 && g_pendingTicket==0 && st.canOpen && gateAsia && st.dayAllowed;
+                     && g_openTicket==0 && g_pendingTicket==0 && st.canOpen && st.dayAllowed;
 
    if(canAttempt && st.swept && haveSig)
      {
@@ -654,8 +653,6 @@ void EvaluateAndAct(const datetime now)
       else if(st.session==SESSION_NONE)                      st.note="out of session";
       else if(!st.canOpen)                                   st.note="session cap reached";
       else if(!st.dayAllowed)                                st.note=dayDisabledNote;
-      else if(st.session==SESSION_ASIA && !st.rangeValid)    st.note="Asia 4H range n/a";
-      else if(st.session==SESSION_ASIA && !st.rangeExited)   st.note="Asia: range not exited yet";
       else if(!st.inWindow)                                  st.note="entry window closed";
       else if(!st.swept)                                     st.note="waiting liquidity sweep";
       else if(!haveSig)                                      st.note="waiting CHoCH/IFVG";
@@ -702,14 +699,12 @@ void UpdateVisuals(const datetime now)
    if(ses==SESSION_NONE) return;
    datetime ss=g_session.SessionStartServer(now);
 
-   // prior-day last-4h range (rule 2) — Asia reference
+   // prior-day last-4h range (rule 2) — reference only, drawn strictly over
+   // its own 4 hours (right edge = range end, never into the Asia session)
    if(ses==SESSION_ASIA && g_session.RangeValid())
-     {
-      datetime proj=g_session.SessionEndServer(now);
-      if(proj<=0) proj=now+6*3600;
       g_visuals.DrawPriorRange(g_session.RangeStartSrv(),g_session.RangeEndSrv(),
-                               proj,g_session.RangeHigh(),g_session.RangeLow());
-     }
+                               g_session.RangeEndSrv(),
+                               g_session.RangeHigh(),g_session.RangeLow());
 
    // the single marked low/high to be swept (trails to newest; turns
    // "SWEPT" once price takes it)
