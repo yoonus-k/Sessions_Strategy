@@ -101,26 +101,47 @@ public:
       datetime endServer=FromRiyadh(closeRiyadh,m_s);
       datetime startServer=FromRiyadh(startRiyadh,m_s);
 
-      // Count-based copy of the last 'rangeLengthHours' of bars ending at the
-      // prior-day close. This always returns data even across holiday gaps
-      // (a pure time-range copy returns nothing when that day was closed).
+      // Fetch a generous count of bars ending at the prior-day close (count
+      // copy still returns data across holiday gaps), then apply a STRICT
+      // time filter [start, end). A purely count-based window drifts left of
+      // the true start (box starting 19:5x instead of 20:00) whenever the
+      // midnight bar is included in the count or bars are missing inside.
       int barsNeeded=(int)(m_s.rangeLengthHours*3600/PeriodSeconds(m_s.tf));
       if(barsNeeded<2) barsNeeded=2;
       MqlRates r[]; ArraySetAsSeries(r,true);
-      int n=CopyRates(m_symbol,m_s.tf,endServer,barsNeeded,r);
+      int n=CopyRates(m_symbol,m_s.tf,endServer,2*barsNeeded,r);
       if(n<2)
         {
          m_rangeValid=false; // retry next tick (key not cached)
          return;
         }
-      double hi=-DBL_MAX, lo=DBL_MAX;
+      double hi=-DBL_MAX, lo=DBL_MAX; int used=0;
       for(int i=0;i<n;i++)
         {
+         if(r[i].time<startServer || r[i].time>=endServer) continue;
          if(r[i].high>hi) hi=r[i].high;
          if(r[i].low <lo) lo=r[i].low;
+         used++;
+        }
+      if(used>=2)
+         m_rangeStartSrv=startServer; // box anchored at the true range start
+      else
+        {
+         // market was closed in that window (weekend/holiday): fall back to
+         // the last 'barsNeeded' bars before the close, at their real times
+         hi=-DBL_MAX; lo=DBL_MAX; int cnt=0; datetime oldest=endServer;
+         for(int i=0;i<n && cnt<barsNeeded;i++)
+           {
+            if(r[i].time>=endServer) continue;
+            if(r[i].high>hi) hi=r[i].high;
+            if(r[i].low <lo) lo=r[i].low;
+            oldest=r[i].time; cnt++;
+           }
+         if(cnt<2){ m_rangeValid=false; return; }
+         m_rangeStartSrv=oldest;
         }
       m_rangeHigh=hi; m_rangeLow=lo;
-      m_rangeStartSrv=r[n-1].time; m_rangeEndSrv=endServer;
+      m_rangeEndSrv=endServer;
       m_rangeDayKey=key; m_rangeValid=true; m_rangeExited=false;
      }
 

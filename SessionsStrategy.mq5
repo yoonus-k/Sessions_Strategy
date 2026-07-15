@@ -191,6 +191,15 @@ int OnInit()
    g_trade.SetExpertMagicNumber(g_s.magic);
    g_trade.SetTypeFillingBySymbol(sym);
    g_trade.SetDeviationInPoints(20);
+
+   // warn immediately if the terminal will reject our orders (retcode 10027)
+   if(!(bool)MQLInfoInteger(MQL_TESTER))
+     {
+      if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+         Alert("SS: Algo Trading is DISABLED in the terminal (toolbar button / Ctrl+E) - all orders will FAIL");
+      else if(!(bool)MQLInfoInteger(MQL_TRADE_ALLOWED))
+         Alert("SS: live trading not allowed for this EA - enable 'Allow Algo Trading' in the EA settings (F7 > Common)");
+     }
    return(INIT_SUCCEEDED);
   }
 
