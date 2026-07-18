@@ -403,6 +403,28 @@ void TrailPendingOnNewBos(const datetime now)
 
    g_entry.SetWindow(g_session.SessionStartServer(now)
                      -(datetime)(g_s.detectPreHours*3600.0));
+   g_entry.SetSessionStart(g_session.SessionStartServer(now));
+   g_entry.SetNotBefore(g_liq.TargetTime()); // patterns from the sweep leg on
+
+   // an IFVG confirming while the CHoCH limit is still UNFILLED supersedes
+   // it: charter order is "first valid trigger after the sweep wins", and
+   // the IFVG is an immediate close-confirmed market entry — don't keep
+   // waiting on a retrace that may never come
+   if(g_s.entryModel!=ENTRY_CHOCH_ONLY)
+     {
+      SEntrySignal ifvg;
+      if(g_entry.CheckIFVG(bias,ifvg))
+        {
+         PrintFormat("[SS] IFVG confirmed while CHoCH limit %I64u unfilled -> cancelling limit, entering MARKET",
+                     g_pendingTicket);
+         g_trade.OrderDelete(g_pendingTicket);
+         g_pendingTicket=0; g_pendingModel="";
+         g_bosCount=0; g_pendingBasisTime=0;
+         PlaceOrder(bias,ifvg);
+         return;
+        }
+     }
+
    SEntrySignal sig;
    if(!g_entry.CheckCHoCH(bias,sig)) return;
    if(sig.structTime==g_lastBos.structTime) return;   // same BOS, nothing new
@@ -615,6 +637,7 @@ void EvaluateAndAct(const datetime now)
    // only runs during the session.
    datetime ss=(st.session!=SESSION_NONE)?g_session.SessionStartServer(now):0;
    g_entry.SetWindow(ss>0?ss-(datetime)(g_s.detectPreHours*3600.0):0);
+   g_entry.SetSessionStart(ss); // pattern core stays in-session
 
    // sweep + entry evaluated whenever armed & in session (for the dashboard),
    // independent of the entry window
@@ -625,7 +648,10 @@ void EvaluateAndAct(const datetime now)
       st.swept=g_liq.Swept(); st.sweptLevel=g_liq.SweptLevel(); st.sweepWick=g_liq.SweepExtreme();
       if(st.swept)
         {
-         g_entry.SetNotBefore(g_liq.SweepAt()); // entry pattern must be post-sweep
+         // entry pattern must belong to the SWEEPING LEG or later: anchored
+         // at the swept level's own bar, so gaps formed by the leg that runs
+         // up/down to take the liquidity count, while older zones never do
+         g_entry.SetNotBefore(g_liq.TargetTime());
          haveSig=g_entry.CheckEntry(st.bias,sig);
          st.entryMet=haveSig;
          if(haveSig)
@@ -765,11 +791,22 @@ void UpdateLivePatterns(const datetime now)
   {
    if(InpShowFVGs)
      {
-      // draw only the NEWEST fvg/ifvg (index 0 = most recent), ignore older ones
-      SFvg fv[]; ArrayResize(fv,4);
-      int c=g_entry.CollectFVGs(fv,4,120);
-      if(c>0) g_visuals.DrawFVG(0,fv[0].t,now,fv[0].lo,fv[0].hi,fv[0].inverted,fv[0].bullish);
-      g_visuals.ClearFVGs(1,InpMaxFVGs);
+      // draw the newest gap RELEVANT to the armed bias: a SELL entry inverts
+      // a BULLISH gap (close below it) and a BUY entry inverts a BEARISH
+      // one — so that is the zone worth marking. No bias -> newest of any.
+      ENUM_BIAS fb=g_panel.Bias();
+      SFvg fv[]; ArrayResize(fv,8);
+      int c=g_entry.CollectFVGs(fv,8,120);
+      int pick=-1;
+      for(int i=0;i<c;i++)
+        {
+         if(fb==BIAS_SELL && !fv[i].bullish) continue; // sell hunts bullish gaps
+         if(fb==BIAS_BUY  &&  fv[i].bullish) continue; // buy hunts bearish gaps
+         pick=i; break;
+        }
+      if(pick>=0)
+         g_visuals.DrawFVG(0,fv[pick].t,now,fv[pick].lo,fv[pick].hi,fv[pick].inverted,fv[pick].bullish);
+      g_visuals.ClearFVGs(pick>=0?1:0,InpMaxFVGs);
      }
 
    ENUM_BIAS bias=g_panel.Bias();
@@ -842,9 +879,7 @@ void OnTick()
          ENUM_SESSION ses=g_session.CurrentSession(now);
          if(ses!=SESSION_NONE)
            {
-            datetime ss=g_session.SessionStartServer(now)
-                        -(datetime)(g_s.detectPreHours*3600.0);
-            UpdateSwings(ss); // swing dots match what the detector can see
+            UpdateSwings(g_session.SessionStartServer(now)); // in-session structure only
             UpdateLivePatterns(now);
            }
          else

@@ -51,8 +51,9 @@ private:
    SSettings m_s;
    string    m_symbol;
    int       m_lookback;
-   datetime  m_from;      // detection window start; 0 = unbounded
-   datetime  m_notBefore; // sweep bar time: IFVG zones must not pre-date it (0 = off)
+   datetime  m_from;         // detection window start; 0 = unbounded
+   datetime  m_notBefore;    // sweep-leg start: IFVG zones must not pre-date it (0 = off)
+   datetime  m_sessionStart; // pattern CORE (broken swing / gap displacement) must be in-session
 
    int Copy(MqlRates &r[]) const
      {
@@ -65,17 +66,27 @@ private:
 public:
    void Init(const SSettings &s,const string symbol,const int lookbackBars=150)
      {
-      m_s=s; m_symbol=symbol; m_lookback=lookbackBars; m_from=0; m_notBefore=0;
+      m_s=s; m_symbol=symbol; m_lookback=lookbackBars;
+      m_from=0; m_notBefore=0; m_sessionStart=0;
      }
 
    //--- Restrict all detection to bars from this server time onward
    void SetWindow(const datetime fromTime){ m_from=fromTime; }
 
-   //--- Entry patterns must form AT or AFTER the sweep bar (charter: the
-   //    entry model is looked for AFTER the sweep). Applies to the IFVG
-   //    zone; a CHoCH break is inherently post-sweep since entries are only
+   //--- Entry patterns must form within the SWEEPING LEG or later (anchor =
+   //    the swept level's own bar). Charter: the entry model is looked for
+   //    after the sweep — gaps made by the leg taking the liquidity count,
+   //    zones older than that leg never trigger. Applies to the IFVG zone;
+   //    a CHoCH break is inherently post-sweep since entries are only
    //    evaluated once the sweep has latched.
    void SetNotBefore(const datetime t){ m_notBefore=t; }
+
+   //--- The pattern's CORE must be an in-session bar: the broken swing of a
+   //    CHoCH and the displacement candle of an IFVG gap. Pre-session bars
+   //    (the extended copy window) only serve as confirmation NEIGHBOURS
+   //    for session-boundary swings/gaps — only the SWEEP may reference
+   //    structure outside the session.
+   void SetSessionStart(const datetime t){ m_sessionStart=t; }
 
    //+----------------------------------------------------------------+
    //| CHoCH: structure break (close-confirmed) -> LIMIT at retrace    |
@@ -96,7 +107,14 @@ public:
         {
          // most recent confirmed swing high = the last lower-high to break
          int iStruct=-1;
-         for(int i=1+N;i<lim;i++) if(IsSwingHigh(r,n,i,N)){ iStruct=i; break; }
+         for(int i=1+N;i<lim;i++)
+           {
+            if(m_sessionStart>0 && r[i].time<m_sessionStart) break; // in-session swings only
+            if(!IsSwingHigh(r,n,i,N)) continue;
+            // take the newest swing whose level is FRESHLY broken (prior
+            // close below, last close above); stale swings are scanned past
+            if(r[2].close<=r[i].high && r[1].close>r[i].high){ iStruct=i; break; }
+           }
          if(iStruct<0) return(false);
          double lvl=r[iStruct].high;
          // FRESH break: prior closed bar below, last closed bar above
@@ -119,7 +137,12 @@ public:
       else if(bias==BIAS_SELL)
         {
          int iStruct=-1;
-         for(int i=1+N;i<lim;i++) if(IsSwingLow(r,n,i,N)){ iStruct=i; break; }
+         for(int i=1+N;i<lim;i++)
+           {
+            if(m_sessionStart>0 && r[i].time<m_sessionStart) break; // in-session swings only
+            if(!IsSwingLow(r,n,i,N)) continue;
+            if(r[2].close>=r[i].low && r[1].close<r[i].low){ iStruct=i; break; } // fresh break
+           }
          if(iStruct<0) return(false);
          double lvl=r[iStruct].low;
          if(r[2].close>=lvl && r[1].close<lvl)
@@ -157,10 +180,14 @@ public:
             double zoneLow =r[i].high;
             double zoneHigh=r[i+2].low;
             if(zoneHigh<=zoneLow) continue;
-            // the gap's displacement candle must be the sweep bar or later
-            // (bars are newest-first: once older than the sweep, all are)
+            // the gap's displacement candle must be IN-SESSION and must not
+            // pre-date the sweeping leg (bars newest-first: once older, all are)
+            if(m_sessionStart>0 && r[i+1].time<m_sessionStart) break;
             if(m_notBefore>0 && r[i+1].time<m_notBefore) break;
-            if(r[1].low<=zoneHigh && r[1].close>zoneHigh)
+            // FRESH close through the gap's far edge: prior close at/below
+            // it, last close above — catches both a touch-and-reclaim and a
+            // straight displacement through the zone (no wick-touch needed)
+            if(r[2].close<=zoneHigh && r[1].close>zoneHigh)
               {
                sig.valid=true; sig.model="IFVG"; sig.useLimit=false; sig.price=0;
                sig.zoneLo=zoneLow; sig.zoneHi=zoneHigh; sig.zoneTime=r[i+2].time;
@@ -177,8 +204,10 @@ public:
             double zoneHigh=r[i].low;
             double zoneLow =r[i+2].high;
             if(zoneHigh<=zoneLow) continue;
-            if(m_notBefore>0 && r[i+1].time<m_notBefore) break; // pre-sweep gap
-            if(r[1].high>=zoneLow && r[1].close<zoneLow)
+            if(m_sessionStart>0 && r[i+1].time<m_sessionStart) break; // in-session only
+            if(m_notBefore>0 && r[i+1].time<m_notBefore) break; // pre-sweep-leg gap
+            // fresh close through the far edge (mirror of the BUY note)
+            if(r[2].close>=zoneLow && r[1].close<zoneLow)
               {
                sig.valid=true; sig.model="IFVG"; sig.useLimit=false; sig.price=0;
                sig.zoneLo=zoneLow; sig.zoneHi=zoneHigh; sig.zoneTime=r[i+2].time;

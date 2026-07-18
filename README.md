@@ -84,13 +84,13 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
   downward sweep — no "was it above first" gate needed). It **latches** for the session and the
   label flips to `low SWEPT` (khaki).
 - **SL anchor** = the session's extreme (lowest low for a buy / highest high for a sell).
-- **Detection of CHoCH / IFVG / FVG / swings** sees the session bars **plus `DetectPreHours`
-  (default 2h) before the open** — the first session candles often sweep and gap against
-  PRE-session structure that a session-only window cannot reference (e.g. the opening candle
-  itself forming the FVG with the bar before the open). The **confirming close is always an
-  in-session bar** since evaluation only runs during the session; set `DetectPreHours = 0` to
-  restore strict in-session detection. The *sweep target* keeps its own deeper `PreSweepHours`
-  window.
+- **Detection of CHoCH / IFVG** requires the pattern's CORE to be **in-session**: the broken
+  swing of a CHoCH and the displacement candle of an IFVG gap must be session bars. Bars from
+  `DetectPreHours` (default 2h) before the open are copied **only as confirmation neighbours**
+  — so the very first session candle can form a confirmed swing or a 3-candle gap with the bar
+  before the open (e.g. the opening sweep candle being itself the gap). The confirming close is
+  always in-session, and only the *sweep target* may reference structure outside the session
+  (its own deeper `PreSweepHours` window).
 - **One position at a time**: while a trade or a pending CHoCH limit is live, the EA **stops all
   detection and setup drawing** and only manages the open position.
 
@@ -119,6 +119,10 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
   - Order **expires at the end of the entry window** (rule 3); if unfilled it is cancelled. If
     price has already retraced past the level by the time of the signal, the EA falls back to a
     market entry at current price.
+  - **IFVG supersedes an unfilled limit**: while the CHoCH limit is pending, IFVG detection
+    keeps running (post-sweep zones only). If an IFVG confirms on a candle close before the
+    limit fills, the limit is cancelled and the IFVG enters at **market** — "first valid
+    trigger after the sweep wins".
   - **BOS trailing**: while the limit is pending, new structure breaks keep being detected. The
     order always sits on the **second-newest BOS** — BOS #2 keeps the order on BOS #1; from
     BOS #3 on, the order is lifted to the previous newest BOS, and so on. The newest BOS is
@@ -128,9 +132,15 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 
 ### 4.4 IFVG — Inverse Fair Value Gap (secondary trigger)
 - A **FVG** is a 3-candle imbalance; an **IFVG** forms when an existing FVG is traded through and closed beyond (invalidated), flipping into opposite S/R. Entry on a close-confirmed reaction from the inverted zone. First valid trigger after the sweep wins — and **if a CHoCH and an IFVG fire on the same candle (`EntryModel = EITHER`), the IFVG takes priority** (it is an immediate market entry at a confirmed rejection, no pullback needed).
-- **Post-sweep only**: the gap's displacement candle must be the sweep bar itself or later —
-  the entry model is *looked for after the sweep* (charter), so zones that formed before the
-  liquidity was taken can never trigger an entry, even if price reclaims them later.
+- **Sweep-leg or later only**: the gap's displacement candle must not pre-date the **swept
+  level's own bar** — i.e. it must belong to the leg that runs to take the liquidity, or come
+  after it. The entry model is *looked for after the sweep* (charter): gaps made by the
+  sweeping leg itself count, while zones older than that leg can never trigger an entry, even
+  if price reclaims them later.
+- **Trigger = fresh close through the far edge**: prior bar closed at/inside the zone edge,
+  last bar closed beyond it in the trade direction. A wick-touch is NOT required, so a straight
+  displacement candle that closes through the whole zone fires too. Direction mapping: a SELL
+  inverts a **bullish** gap (close below it); a BUY inverts a **bearish** gap (close above it).
 
 ### 4.5 Entry sequence (per session)
 ```
@@ -269,7 +279,8 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 - **ASIA / NY boxes** (blue / red, **outline only**) — developing session high–low (no fill, so it no longer covers the candles).
 - **Swing dots** (tomato highs / green lows) — the structure skeleton.
 - **Sweep target** (gold `low to sweep` → khaki `low SWEPT`) — the single marked level, trailing to the newest swing.
-- **Newest FVG / IFVG** (gray = FVG, orchid = inverted IFVG) — only the **most recent** zone is shown.
+- **Newest FVG / IFVG** (gray = FVG, orchid = inverted IFVG) — only the most recent zone
+  **relevant to the armed bias** is shown (SELL → newest bullish gap, BUY → newest bearish gap).
 - **CHoCH watch line** (aqua) — the swing level a CHoCH would break next.
 - **CHoCH signal** (aqua) — only the **newest** breaking leg + broken level + limit line.
 - **Trade** — entry (silver), SL (red), TP (green) rays + an up/down arrow at the fill.
