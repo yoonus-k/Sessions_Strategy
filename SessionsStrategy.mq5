@@ -46,6 +46,7 @@ input int             InpChochSwing         = 1;           // Swing strength (N)
 input ENUM_ENTRY_MODEL InpEntryModel        = ENTRY_EITHER; // Entry: CHoCH or IFVG, whichever fires first
 input double          InpChochRetrace       = 0.25;        // CHoCH limit retrace of breaking leg (0..1)
 input double          InpPreSweepHours      = 8.0;         // Look this many hours left of session open for the low/high to sweep
+input double          InpDetectPreHours     = 2.0;         // CHoCH/IFVG structure sees this many hours before session open (0 = session bars only)
 
 input group "Risk"
 input double          InpRiskPercent        = 0.95;        // Risk per trade (% capital)
@@ -148,6 +149,7 @@ void BuildSettings()
    g_s.entryModel            =InpEntryModel;
    g_s.chochEntryRetrace     =InpChochRetrace;
    g_s.preSweepHours         =InpPreSweepHours;
+   g_s.detectPreHours        =InpDetectPreHours;
    g_s.riskPercent           =InpRiskPercent;
    g_s.slAnchor              =InpSLAnchor;
    g_s.slBufferPoints        =InpSLBufferPoints;
@@ -399,7 +401,8 @@ void TrailPendingOnNewBos(const datetime now)
    ENUM_SESSION ses=g_session.CurrentSession(now);
    if(ses==SESSION_NONE || !g_session.InEntryWindow(now)) return;
 
-   g_entry.SetWindow(g_session.SessionStartServer(now));
+   g_entry.SetWindow(g_session.SessionStartServer(now)
+                     -(datetime)(g_s.detectPreHours*3600.0));
    SEntrySignal sig;
    if(!g_entry.CheckCHoCH(bias,sig)) return;
    if(sig.structTime==g_lastBos.structTime) return;   // same BOS, nothing new
@@ -605,9 +608,13 @@ void EvaluateAndAct(const datetime now)
 
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
-   // bound ALL detection to bars from the session open onward
+   // detection window: session bars PLUS 'detectPreHours' before the open —
+   // the first session candles often sweep/gap against PRE-session structure
+   // (swings, FVGs), which a session-only window cannot see. The signal bar
+   // itself (the confirming close) is always in-session since evaluation
+   // only runs during the session.
    datetime ss=(st.session!=SESSION_NONE)?g_session.SessionStartServer(now):0;
-   g_entry.SetWindow(ss);
+   g_entry.SetWindow(ss>0?ss-(datetime)(g_s.detectPreHours*3600.0):0);
 
    // sweep + entry evaluated whenever armed & in session (for the dashboard),
    // independent of the entry window
@@ -618,6 +625,7 @@ void EvaluateAndAct(const datetime now)
       st.swept=g_liq.Swept(); st.sweptLevel=g_liq.SweptLevel(); st.sweepWick=g_liq.SweepExtreme();
       if(st.swept)
         {
+         g_entry.SetNotBefore(g_liq.SweepAt()); // entry pattern must be post-sweep
          haveSig=g_entry.CheckEntry(st.bias,sig);
          st.entryMet=haveSig;
          if(haveSig)
@@ -834,8 +842,9 @@ void OnTick()
          ENUM_SESSION ses=g_session.CurrentSession(now);
          if(ses!=SESSION_NONE)
            {
-            datetime ss=g_session.SessionStartServer(now);
-            UpdateSwings(ss);
+            datetime ss=g_session.SessionStartServer(now)
+                        -(datetime)(g_s.detectPreHours*3600.0);
+            UpdateSwings(ss); // swing dots match what the detector can see
             UpdateLivePatterns(now);
            }
          else

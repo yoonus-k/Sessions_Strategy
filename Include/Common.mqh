@@ -68,6 +68,7 @@ struct SSettings
    ENUM_ENTRY_MODEL  entryModel;
    double            chochEntryRetrace;       // CHoCH limit retrace of breaking leg (0.25)
    double            preSweepHours;           // how far left of session open to look for the low/high to sweep
+   double            detectPreHours;          // CHoCH/IFVG structure may reference bars this far before session open
    // Risk
    double            riskPercent;             // 0.95
    ENUM_SL_ANCHOR    slAnchor;                // CHoCH leg extreme vs sweep wick

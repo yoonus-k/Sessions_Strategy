@@ -39,6 +39,7 @@ private:
    double    m_sweptLevel;     // the level that was actually taken
    double    m_sweepExtreme;   // session extreme = SL anchor (the wick)
    datetime  m_sweepTime;
+   datetime  m_sweepAt;        // bar that actually TOOK the level (entry patterns must not pre-date it)
    double    m_targetLevel;    // the low/high currently marked to be swept
    datetime  m_targetTime;
 
@@ -52,6 +53,7 @@ public:
    void Reset()
      {
       m_swept=false; m_sweptLevel=0; m_sweepExtreme=0; m_sweepTime=0;
+      m_sweepAt=0;
       m_targetLevel=0; m_targetTime=0;
      }
 
@@ -86,10 +88,11 @@ public:
       if(bias==BIAS_BUY)
         {
          // 1) break-check the level we are CURRENTLY watching, wick is enough
+         //    (oldest-first so m_sweepAt = the FIRST bar that took the level)
          if(!m_swept && m_targetLevel>0)
-            for(int k=0;k<n;k++)
+            for(int k=n-1;k>=0;k--)
                if(r[k].time>=sessionStart && r[k].time>m_targetTime && r[k].low<m_targetLevel)
-                 { m_swept=true; m_sweptLevel=m_targetLevel; break; }
+                 { m_swept=true; m_sweptLevel=m_targetLevel; m_sweepAt=r[k].time; break; }
 
          // 2) not yet swept -> may trail forward to a newer confirmed swing low
          if(!m_swept)
@@ -111,9 +114,9 @@ public:
       else // BIAS_SELL
         {
          if(!m_swept && m_targetLevel>0)
-            for(int k=0;k<n;k++)
+            for(int k=n-1;k>=0;k--)
                if(r[k].time>=sessionStart && r[k].time>m_targetTime && r[k].high>m_targetLevel)
-                 { m_swept=true; m_sweptLevel=m_targetLevel; break; }
+                 { m_swept=true; m_sweptLevel=m_targetLevel; m_sweepAt=r[k].time; break; }
 
          if(!m_swept)
            {
@@ -132,6 +135,7 @@ public:
 
    bool     Swept()        const { return(m_swept); }
    double   SweptLevel()   const { return(m_sweptLevel); }
+   datetime SweepAt()      const { return(m_sweepAt); } // bar that took the level
    double   SweepExtreme() const { return(m_sweepExtreme); } // SL anchor (wick)
    datetime SweepTime()    const { return(m_sweepTime); }
    double   TargetLevel()  const { return(m_targetLevel); }  // marked low/high to sweep

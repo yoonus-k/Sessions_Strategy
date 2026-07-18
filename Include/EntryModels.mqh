@@ -51,7 +51,8 @@ private:
    SSettings m_s;
    string    m_symbol;
    int       m_lookback;
-   datetime  m_from;     // session-open bound; 0 = unbounded
+   datetime  m_from;      // detection window start; 0 = unbounded
+   datetime  m_notBefore; // sweep bar time: IFVG zones must not pre-date it (0 = off)
 
    int Copy(MqlRates &r[]) const
      {
@@ -64,11 +65,17 @@ private:
 public:
    void Init(const SSettings &s,const string symbol,const int lookbackBars=150)
      {
-      m_s=s; m_symbol=symbol; m_lookback=lookbackBars; m_from=0;
+      m_s=s; m_symbol=symbol; m_lookback=lookbackBars; m_from=0; m_notBefore=0;
      }
 
    //--- Restrict all detection to bars from this server time onward
    void SetWindow(const datetime fromTime){ m_from=fromTime; }
+
+   //--- Entry patterns must form AT or AFTER the sweep bar (charter: the
+   //    entry model is looked for AFTER the sweep). Applies to the IFVG
+   //    zone; a CHoCH break is inherently post-sweep since entries are only
+   //    evaluated once the sweep has latched.
+   void SetNotBefore(const datetime t){ m_notBefore=t; }
 
    //+----------------------------------------------------------------+
    //| CHoCH: structure break (close-confirmed) -> LIMIT at retrace    |
@@ -150,13 +157,17 @@ public:
             double zoneLow =r[i].high;
             double zoneHigh=r[i+2].low;
             if(zoneHigh<=zoneLow) continue;
+            // the gap's displacement candle must be the sweep bar or later
+            // (bars are newest-first: once older than the sweep, all are)
+            if(m_notBefore>0 && r[i+1].time<m_notBefore) break;
             if(r[1].low<=zoneHigh && r[1].close>zoneHigh)
               {
                sig.valid=true; sig.model="IFVG"; sig.useLimit=false; sig.price=0;
                sig.zoneLo=zoneLow; sig.zoneHi=zoneHigh; sig.zoneTime=r[i+2].time;
                return(true);
               }
-            return(false);
+            // keep scanning older gaps: the nearest gap is often a fresh one
+            // the move itself just made, while the RECLAIMED zone sits deeper
            }
         }
       else if(bias==BIAS_SELL)
@@ -166,13 +177,14 @@ public:
             double zoneHigh=r[i].low;
             double zoneLow =r[i+2].high;
             if(zoneHigh<=zoneLow) continue;
+            if(m_notBefore>0 && r[i+1].time<m_notBefore) break; // pre-sweep gap
             if(r[1].high>=zoneLow && r[1].close<zoneLow)
               {
                sig.valid=true; sig.model="IFVG"; sig.useLimit=false; sig.price=0;
                sig.zoneLo=zoneLow; sig.zoneHi=zoneHigh; sig.zoneTime=r[i+2].time;
                return(true);
               }
-            return(false);
+            // keep scanning older gaps (mirror of the BUY note)
            }
         }
       return(false);

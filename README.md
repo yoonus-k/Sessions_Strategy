@@ -84,8 +84,13 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
   downward sweep — no "was it above first" gate needed). It **latches** for the session and the
   label flips to `low SWEPT` (khaki).
 - **SL anchor** = the session's extreme (lowest low for a buy / highest high for a sell).
-- **Detection of CHoCH / IFVG / FVG / swings** uses **only in-session bars** (the reversal happens
-  inside the session); only the *sweep target* reaches back before the open.
+- **Detection of CHoCH / IFVG / FVG / swings** sees the session bars **plus `DetectPreHours`
+  (default 2h) before the open** — the first session candles often sweep and gap against
+  PRE-session structure that a session-only window cannot reference (e.g. the opening candle
+  itself forming the FVG with the bar before the open). The **confirming close is always an
+  in-session bar** since evaluation only runs during the session; set `DetectPreHours = 0` to
+  restore strict in-session detection. The *sweep target* keeps its own deeper `PreSweepHours`
+  window.
 - **One position at a time**: while a trade or a pending CHoCH limit is live, the EA **stops all
   detection and setup drawing** and only manages the open position.
 
@@ -123,6 +128,9 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 
 ### 4.4 IFVG — Inverse Fair Value Gap (secondary trigger)
 - A **FVG** is a 3-candle imbalance; an **IFVG** forms when an existing FVG is traded through and closed beyond (invalidated), flipping into opposite S/R. Entry on a close-confirmed reaction from the inverted zone. First valid trigger after the sweep wins — and **if a CHoCH and an IFVG fire on the same candle (`EntryModel = EITHER`), the IFVG takes priority** (it is an immediate market entry at a confirmed rejection, no pullback needed).
+- **Post-sweep only**: the gap's displacement candle must be the sweep bar itself or later —
+  the entry model is *looked for after the sweep* (charter), so zones that formed before the
+  liquidity was taken can never trigger an entry, even if price reclaims them later.
 
 ### 4.5 Entry sequence (per session)
 ```
@@ -224,6 +232,7 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | Entry | `EntryModel` | CHoCH-first | CHoCH / IFVG / either |
 | Entry | `ChochRetrace` | 0.25 | Limit at 25% retrace of breaking leg |
 | Entry | `PreSweepHours` | 8.0 | Hours left of session open to find the low/high to sweep |
+| Entry | `DetectPreHours` | 2.0 | CHoCH/IFVG structure sees this many hours before the open (0 = session only) |
 | Risk | `RiskPercent` | 0.95 | Rule 9 |
 | Risk | `SLAnchor` | CHoCH leg | SL at breaking-leg extreme (CHoCH) or sweep wick |
 | Risk | `SLBufferPoints` | 0 | Pad beyond anchor |
