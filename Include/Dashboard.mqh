@@ -45,7 +45,7 @@ public:
      {
       m_chart=chart_id; m_symbol=symbol;
       m_digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
-      m_x=10; m_y=70; m_w=300; m_lineH=16; m_rows=10;
+      m_x=10; m_y=70; m_w=320; m_lineH=16; m_rows=11;
 
       string bg=DASH_PREFIX+"BG";
       ObjectCreate(m_chart,bg,OBJ_RECTANGLE_LABEL,0,0,0);
@@ -71,33 +71,41 @@ public:
 
       string b=(s.bias==BIAS_BUY)?"BUY":(s.bias==BIAS_SELL)?"SELL":"NONE";
       color  bc=(s.bias==BIAS_BUY)?cGood:(s.bias==BIAS_SELL)?cBad:clrSilver;
-      Label(1,"Bias        : "+b,bc);
+      Label(1,"Bias        : "+b+(s.biasAuto?"  (auto/VWAP)":"  (manual)"),bc);
+
+      // the open-vs-VWAP comparison that produced an auto bias
+      string vw="VWAP        : "+Px(s.vwap);
+      if(s.vwapAtOpen>0 && s.sessionOpen>0)
+         vw+="  open "+Px(s.sessionOpen)
+            +(s.sessionOpen>s.vwapAtOpen?" ABOVE":" BELOW")
+            +" "+Px(s.vwapAtOpen);
+      Label(2,vw,s.vwap>0?cInfo:cWait);
 
       string ses=(s.session==SESSION_ASIA)?"ASIA":(s.session==SESSION_NY)?"NY":"-";
-      Label(2,"Session     : "+ses+"   Window: "+YN(s.inWindow),
+      Label(3,"Session     : "+ses+"   Window: "+YN(s.inWindow),
             s.session==SESSION_NONE?cInfo:(s.inWindow?cGood:cWait));
 
       // 4H range values are reference only - the breakout check is manual
-      Label(3,"4H Range    : "+(s.rangeValid?Px(s.rangeLo)+" / "+Px(s.rangeHi):"n/a")
+      Label(4,"4H Range    : "+(s.rangeValid?Px(s.rangeLo)+" / "+Px(s.rangeHi):"n/a")
             +"  (manual check)",cInfo);
 
-      Label(4,"Sweep       : "+(s.swept?"MET @"+Px(s.sweptLevel):"waiting"),
+      Label(5,"Sweep       : "+(s.swept?"MET @"+Px(s.sweptLevel):"waiting"),
             s.swept?cGood:cWait);
 
       string em=s.entryMet?(s.entryModel+" MET"+(s.entryIsLimit?" limit@"+Px(s.entryPrice):" mkt"))
                           :"waiting";
-      Label(5,"Entry model : "+em,s.entryMet?cGood:cWait);
+      Label(6,"Entry model : "+em,s.entryMet?cGood:cWait);
 
-      Label(6,"Trades      : "+(string)s.trades+"/"+(string)s.maxTrades
+      Label(7,"Trades      : "+(string)s.trades+"/"+(string)s.maxTrades
             +"  Wins: "+(string)s.wins+"  Day: "+(s.dayAllowed?"OK":"OFF"),
             (s.canOpen && s.dayAllowed)?cInfo:cBad);
 
       string pos=s.positionOpen?StringFormat("OPEN  %.2f%%",s.floatPct):"none";
-      Label(7,"Position    : "+pos+(s.pending?"   [LIMIT pending]":""),
+      Label(8,"Position    : "+pos+(s.pending?"   [LIMIT pending]":""),
             s.positionOpen?cGood:cInfo);
 
-      Label(8,"Note        : "+s.note,cInfo);
-      Label(9,DayOfWeekName(TimeCurrent())+"  "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES)
+      Label(9,"Note        : "+s.note,cInfo);
+      Label(10,DayOfWeekName(TimeCurrent())+"  "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES)
             +"  (server)",clrSilver);
 
       ChartRedraw(m_chart);

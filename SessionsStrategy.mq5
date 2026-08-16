@@ -15,6 +15,7 @@
 #include "Include/SessionManager.mqh"
 #include "Include/BiasPanel.mqh"
 #include "Include/Liquidity.mqh"
+#include "Include/Vwap.mqh"
 #include "Include/EntryModels.mqh"
 #include "Include/RiskManager.mqh"
 #include "Include/DynamicTP.mqh"
@@ -35,6 +36,14 @@ input string          InpAsiaEnd            = "06:00";     // Asia session end
 input string          InpNYStart            = "15:00";     // NY session start
 input string          InpNYEnd              = "18:00";     // NY session end
 input int             InpEntryWindowMinutes = 90;          // Entry window from open (min)
+
+input group "Bias source (VWAP auto-bias)"
+input ENUM_BIAS_MODE   InpBiasMode          = BIAS_MODE_VWAP;  // Bias source: manual panel / VWAP at session open
+input ENUM_VWAP_ANCHOR InpVwapAnchor        = VWAP_ANCHOR_DAY; // VWAP anchor period (Pine "Session" = day)
+input ENUM_VWAP_SOURCE InpVwapSource        = VWAP_SRC_HLC3;   // VWAP price source (Pine default hlc3)
+input bool             InpShowVwap          = true;            // Draw the VWAP curve
+input color            InpColorVwap         = C'41,98,255';    // VWAP colour (TradingView #2962FF)
+input int              InpVwapDrawBars      = 400;             // Max VWAP segments drawn
 
 input group "Asia prior-day range (rule 2)"
 input int             InpDayCloseHour       = 0;           // Day-close hour (Riyadh)
@@ -99,6 +108,7 @@ SSettings        g_s;
 CSessionManager  g_session;
 CBiasPanel       g_panel;
 CLiquidity       g_liq;
+CVwap            g_vwap;
 CEntryModels     g_entry;
 CRiskManager     g_risk;
 CDynamicTP       g_dtp;
@@ -122,6 +132,15 @@ string           g_openModel="";      // entry model of the open trade (report)
 string           g_openDay="";        // Riyadh week-day the trade opened on
 double           g_openLots=0;
 string           g_lastSessionKey="";
+//--- VWAP auto-bias state
+string           g_autoBiasKey="";    // session key the auto bias was decided for
+double           g_vwapAtOpen=0;      // VWAP carried into that session open
+double           g_sessionOpenPx=0;   // open of the session's first bar
+datetime         g_sessionOpenT=0;    // time of that bar
+double           g_vwapNow=0;         // live VWAP (refreshed on bar close)
+datetime         g_vwapDrawnTo=0;     // last bar the VWAP curve was drawn to
+datetime         g_vwapAnchorDrawn=0; // anchor the drawn curve belongs to
+string           g_autoBiasWarnKey=""; // session already warned about missing VWAP data
 
 //+------------------------------------------------------------------+
 int ParseHM(const string hm)
@@ -150,6 +169,9 @@ void BuildSettings()
    g_s.chochEntryRetrace     =InpChochRetrace;
    g_s.preSweepHours         =InpPreSweepHours;
    g_s.detectPreHours        =InpDetectPreHours;
+   g_s.biasMode              =InpBiasMode;
+   g_s.vwapAnchor            =InpVwapAnchor;
+   g_s.vwapSource            =InpVwapSource;
    g_s.riskPercent           =InpRiskPercent;
    g_s.slAnchor              =InpSLAnchor;
    g_s.slBufferPoints        =InpSLBufferPoints;
@@ -177,6 +199,7 @@ int OnInit()
    g_session.Init(g_s,sym);
    g_panel.Init(ChartID());
    g_liq.Init(g_s,sym);
+   g_vwap.Init(g_s,sym);
    g_entry.Init(g_s,sym);
    g_risk.Init(g_s,sym);
    g_dtp.Init(g_s,sym);
@@ -185,10 +208,20 @@ int OnInit()
    g_visuals.InitSignals(InpShowSignals,InpColorChoch,InpColorIfvg,InpColorSweep);
    g_visuals.InitSwings(InpShowSwings,InpColorSwingHi,InpColorSwingLo);
    g_visuals.SetFvgColor(InpColorFvg);
+   g_visuals.InitVwap(InpShowVwap,InpColorVwap);
    g_dash.Init(ChartID(),sym);
 
-   // backtest convenience: arm a fixed bias without clicking the panel
-   if(InpForcedBias!=BIAS_NONE) g_panel.SetBias(InpForcedBias);
+   // backtest convenience: arm a fixed bias without clicking the panel.
+   // ForcedBias outranks the VWAP auto-bias (see UpdateAutoBias).
+   if(InpForcedBias!=BIAS_NONE)
+     {
+      g_panel.SetBias(InpForcedBias);
+      if(InpBiasMode==BIAS_MODE_VWAP)
+         Alert("SS: ForcedBias is set - the VWAP auto-bias is DISABLED. Set ForcedBias = NONE in the Inputs tab to use it.");
+     }
+   else if(InpBiasMode==BIAS_MODE_VWAP)
+      PrintFormat("[SS] BIAS MODE: AUTO via VWAP (%s anchor) - the panel is an override only",
+                  InpVwapAnchor==VWAP_ANCHOR_WEEK?"week":"day");
 
    g_trade.SetExpertMagicNumber(g_s.magic);
    g_trade.SetTypeFillingBySymbol(sym);
@@ -222,6 +255,10 @@ void RefreshDashboardLive()
   {
    datetime now=TimeCurrent();
    g_state.bias        =g_panel.Bias();
+   g_state.biasAuto    =(g_s.biasMode==BIAS_MODE_VWAP && InpForcedBias==BIAS_NONE);
+   g_state.vwap        =g_vwapNow;
+   g_state.vwapAtOpen  =g_vwapAtOpen;
+   g_state.sessionOpen =g_sessionOpenPx;
    g_state.session     =g_session.CurrentSession(now);
    g_state.inWindow    =g_session.InEntryWindow(now);
    g_state.positionOpen=(g_openTicket!=0);
@@ -233,13 +270,15 @@ void RefreshDashboardLive()
    g_state.dayAllowed=!(_drl.day_of_week==1 && !g_s.tradeMonday) &&
                       !(_drl.day_of_week==5 && !g_s.tradeFriday);
    g_state.maxTrades =g_s.maxTradesPerSession;
+   string noBias=g_state.biasAuto?"waiting session open (VWAP auto-bias)"
+                                 :"arm a bias (BUY/SELL)";
    if(g_state.bias==BIAS_NONE)
-      g_state.note="arm a bias (BUY/SELL)";
+      g_state.note=noBias;
    else if(!g_state.dayAllowed)
       g_state.note=(_drl.day_of_week==1)?"Monday trading disabled":"Friday trading disabled";
    else if(g_state.session==SESSION_NONE)
       g_state.note="armed - out of session";
-   else if(g_state.note=="arm a bias (BUY/SELL)" ||
+   else if(g_state.note==noBias ||
            g_state.note=="Monday trading disabled" ||
            g_state.note=="Friday trading disabled")
       g_state.note="armed - evaluating on bar close";
@@ -606,6 +645,8 @@ void EvaluateAndAct(const datetime now)
   {
    SStratState st;
    st.bias=g_panel.Bias();
+   st.biasAuto=(g_s.biasMode==BIAS_MODE_VWAP && InpForcedBias==BIAS_NONE);
+   st.vwap=g_vwapNow; st.vwapAtOpen=g_vwapAtOpen; st.sessionOpen=g_sessionOpenPx;
    st.session=g_session.CurrentSession(now);
    st.inWindow=g_session.InEntryWindow(now);
    st.rangeValid=g_session.RangeValid();
@@ -690,7 +731,9 @@ void EvaluateAndAct(const datetime now)
      }
    else
      {
-      if(st.bias==BIAS_NONE)                                  st.note="arm a bias (BUY/SELL)";
+      if(st.bias==BIAS_NONE)                                  st.note=st.biasAuto
+                                                                       ?"waiting session open (VWAP auto-bias)"
+                                                                       :"arm a bias (BUY/SELL)";
       else if(st.positionOpen)                               st.note="managing position";
       else if(st.pending)                                    st.note="limit pending";
       else if(st.session==SESSION_NONE)                      st.note="out of session";
@@ -819,6 +862,109 @@ void UpdateLivePatterns(const datetime now)
   }
 
 //+------------------------------------------------------------------+
+//| Refresh the live VWAP value and extend its curve by the bars that |
+//| closed since the last call. The curve is wiped and restarted when |
+//| the anchor period rolls over (new Riyadh day / week).             |
+//+------------------------------------------------------------------+
+void UpdateVwap(const datetime now)
+  {
+   datetime anchor=g_vwap.AnchorStart(now);
+   if(anchor!=g_vwapAnchorDrawn)
+     {
+      g_visuals.ClearVwap();
+      g_vwapAnchorDrawn=anchor;
+      g_vwapDrawnTo=0;
+     }
+
+   datetime t[]; double v[];
+   int n=g_vwap.Series(anchor,now,t,v);
+   if(n<=0){ g_vwapNow=0; return; }
+   g_vwapNow=v[n-1];
+
+   if(!InpShowVwap) return;
+   int start=(n>InpVwapDrawBars)?n-InpVwapDrawBars:1; // cap the drawn history
+   for(int i=MathMax(1,start);i<n;i++)
+     {
+      if(t[i]<=g_vwapDrawnTo) continue;               // already drawn
+      g_visuals.DrawVwapSegment(t[i-1],v[i-1],t[i],v[i]);
+     }
+   g_vwapDrawnTo=t[n-1];
+
+   // keep the open-vs-VWAP decision visible for the rest of the day
+   if(g_vwapAtOpen>0 && g_sessionOpenT>0)
+      g_visuals.DrawVwapOpenMark(g_sessionOpenT,g_vwapAtOpen,now,
+         StringFormat("VWAP@open %.2f - open %s -> %s",g_vwapAtOpen,
+                      g_sessionOpenPx>g_vwapAtOpen?"ABOVE":"BELOW",
+                      g_sessionOpenPx>g_vwapAtOpen?"BUY":"SELL"));
+  }
+
+//+------------------------------------------------------------------+
+//| VWAP auto-bias — replaces the manual rule-17 input when           |
+//| BiasMode = VWAP. Decided ONCE per session, on its first bar:      |
+//|   session opens ABOVE the VWAP -> BUY, BELOW -> SELL.             |
+//| The VWAP compared against is the value carried INTO the session   |
+//| (bars strictly before the opening bar), so the opening bar itself |
+//| cannot move the level it is being judged by.                      |
+//| The panel still works as an override: a click after the automatic |
+//| decision wins for the rest of that session (the key is latched).  |
+//| ForcedBias outranks both.                                         |
+//+------------------------------------------------------------------+
+void UpdateAutoBias(const datetime now)
+  {
+   if(g_s.biasMode!=BIAS_MODE_VWAP || InpForcedBias!=BIAS_NONE) return;
+
+   ENUM_SESSION ses=g_session.CurrentSession(now);
+   if(ses==SESSION_NONE)
+     {
+      // out of session: disarm, so nothing is hunted until the next open
+      if(g_autoBiasKey!="")
+        {
+         if(g_panel.Bias()!=BIAS_NONE){ g_panel.SetBias(BIAS_NONE); g_liq.Reset(); }
+         g_autoBiasKey=""; g_autoBiasWarnKey="";
+        }
+      return;
+     }
+
+   string sk=g_session.SessionKey(now);
+   if(sk==g_autoBiasKey) return;              // already decided for this session
+
+   datetime ss=g_session.SessionStartServer(now);
+   if(ss<=0) return;
+
+   MqlRates r[]; ArraySetAsSeries(r,false);
+   if(CopyRates(_Symbol,g_s.tf,ss,now,r)<1) return; // opening bar not there yet
+   datetime openT =r[0].time;
+   double   openPx=r[0].open;
+
+   double vw=0;
+   if(!g_vwap.ValueAt(openT-1,vw) || vw<=0)
+     {
+      if(g_autoBiasWarnKey!=sk)
+        {
+         g_autoBiasWarnKey=sk;
+         PrintFormat("[SS] AUTO BIAS: no VWAP data before the %s open - bias stays NONE",
+                     ses==SESSION_ASIA?"ASIA":"NY");
+        }
+      return;
+     }
+
+   ENUM_BIAS b=(openPx>vw)?BIAS_BUY:(openPx<vw)?BIAS_SELL:BIAS_NONE;
+
+   g_autoBiasKey  =sk;
+   g_vwapAtOpen   =vw;
+   g_sessionOpenPx=openPx;
+   g_sessionOpenT =openT;
+
+   if(b!=g_panel.Bias()){ g_panel.SetBias(b); g_liq.Reset(); }
+
+   string bs=(b==BIAS_BUY)?"BUY":(b==BIAS_SELL)?"SELL":"NONE (open == VWAP)";
+   PrintFormat("[SS] AUTO BIAS (VWAP): %s open %.2f vs VWAP %.2f -> %s",
+               ses==SESSION_ASIA?"ASIA":"NY",openPx,vw,bs);
+   Alert(StringFormat("SS: AUTO BIAS %s - %s open %.2f vs VWAP %.2f",
+                      bs,ses==SESSION_ASIA?"ASIA":"NY",openPx,vw));
+  }
+
+//+------------------------------------------------------------------+
 void OnTick()
   {
    datetime now=TimeCurrent();
@@ -856,6 +1002,11 @@ void OnTick()
       // live 4H range box during its 20:00->00:00 window (outside sessions);
       // it persists and the Asia session reuses the same object key
       UpdateRangeBox(now);
+
+      // VWAP first, then the auto-bias it feeds — both run before the
+      // detection branch so a session can arm and act on the same bar
+      UpdateVwap(now);
+      UpdateAutoBias(now);
 
       // While a trade or pending order is live, do NOT run full detection —
       // manage the position (rule 14 focus). A pending CHoCH limit still

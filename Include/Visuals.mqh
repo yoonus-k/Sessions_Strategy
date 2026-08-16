@@ -30,6 +30,8 @@ private:
    color  m_colSwingHi;
    color  m_colSwingLo;
    color  m_colFvg;
+   bool   m_showVwap;
+   color  m_colVwap;
 
    string DayTag(const datetime t) const
      {
@@ -124,7 +126,10 @@ public:
       m_showSig=true; m_colChoch=clrAqua; m_colIfvg=clrMagenta; m_colSweep=clrYellow;
       m_showSwings=true; m_colSwingHi=clrTomato; m_colSwingLo=clrLimeGreen;
       m_colFvg=clrSlateGray;
+      m_showVwap=true; m_colVwap=C'41,98,255'; // TradingView VWAP blue #2962FF
      }
+
+   void InitVwap(const bool show,const color c){ m_showVwap=show; m_colVwap=c; }
 
    void InitSignals(const bool show,const color cChoch,const color cIfvg,const color cSweep)
      {
@@ -156,15 +161,41 @@ public:
    //    Prior-Day 4H range card) the moment that session ends OR a new one
    //    begins. The range card is rebuilt from scratch during the next
    //    20:00->00:00 window (UpdateRangeBox), so nothing needs to survive here.
+   //    The VWAP curve is deliberately EXEMPT: it is anchored to the day,
+   //    not to a session, and is cleared by ClearVwap() on anchor change.
    void ClearSessionDrawings()
      {
       int total=ObjectsTotal(m_chart,-1,-1);
       for(int i=total-1;i>=0;i--)
         {
          string name=ObjectName(m_chart,i,-1,-1);
-         if(StringFind(name,VIS_PREFIX)!=0) continue; // not ours
+         if(StringFind(name,VIS_PREFIX)!=0) continue;     // not ours
+         if(StringFind(name,VIS_PREFIX+"VW")==0) continue; // day-anchored VWAP
          ObjectDelete(m_chart,name);
         }
+     }
+
+   //--- One segment of the VWAP curve (drawn incrementally, bar by bar)
+   void DrawVwapSegment(const datetime t1,const double v1,
+                        const datetime t2,const double v2)
+     {
+      if(!m_showVwap || v1<=0 || v2<=0) return;
+      EnsureSegment(VIS_PREFIX+"VWS_"+(string)(long)t1,t1,v1,t2,v2,m_colVwap,1);
+     }
+
+   //--- The VWAP value carried into the session open: a flat marker line
+   //    at the level the open price was compared against.
+   void DrawVwapOpenMark(const datetime openT,const double vwapAtOpen,
+                         const datetime toT,const string text)
+     {
+      if(!m_showVwap || vwapAtOpen<=0) return;
+      EnsureSegment(VIS_PREFIX+"VWO_L",openT,vwapAtOpen,toT,vwapAtOpen,m_colVwap,2);
+      EnsureText   (VIS_PREFIX+"VWO_T",openT,vwapAtOpen,text,m_colVwap);
+     }
+
+   void ClearVwap()
+     {
+      ObjectsDeleteAll(m_chart,VIS_PREFIX+"VW");
      }
 
    //--- The single marked low/high to be swept (trails to the newest)

@@ -33,7 +33,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 |-------|----------|
 | **Timeframe** | Primarily **M2** (configurable). |
 | **Timezone** | Sessions in **Riyadh local time (GMT+3, no DST)**; converted from broker server time via offset. |
-| **Bias input** | **On-chart BUY / SELL / NONE buttons.** Default `NONE`. |
+| **Bias input** | **Automatic from VWAP** by default (`BiasMode = VWAP`): the session opens above the VWAP -> BUY, below -> SELL. The on-chart BUY / SELL / NONE buttons remain, as a manual override and as the sole source when `BiasMode = MANUAL`. |
 | **Entry confirmation** | **CHoCH** (close-confirmed break) → **pending LIMIT at 25% retrace of the breaking leg**; **IFVG** secondary → market entry. First valid trigger after the sweep wins. |
 | **Entry window** | **Configurable minutes** from session open (default 90). |
 | **Sweep** | Price simply **takes the level** (trades beyond the prior high/low). No close-back-inside required — the *entry model* provides the reversal confirmation. |
@@ -66,7 +66,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 | 14 | **No early close** — not before **+4%** | EA never auto-closes before +4%. |
 | 15 | **Don't skip valid setups** | EA auto-takes every qualifying setup. |
 | 16 | **Notion/TradingView documentation** | Out of EA scope; optional CSV journal. |
-| 17 | **Session direction** — trader's own analysis | **You** input bias each session. |
+| 17 | **Session direction** — trader's own analysis | **Automated via VWAP** (Section 4.6) when `BiasMode = VWAP` (default); set `BiasMode = MANUAL` to restore the charter's letter and input the bias yourself. The panel overrides either way. |
 | 18 | **Profit accounting** — `total % × 2` | Reporting convention in journal; not used in execution. |
 
 ---
@@ -145,7 +145,8 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 ### 4.5 Entry sequence (per session)
 ```
 1. Session open → bias set (BUY/SELL)?                ──no──► idle
-   (rule-2 4H-range breakout is checked MANUALLY before arming the bias)
+   (BiasMode=VWAP arms it automatically here — Section 4.6;
+    rule-2 4H-range breakout is still the trader's MANUAL check)
 2. Within EntryWindowMinutes of open?                 ──no──► lock session
 3. Nearest opposing high/low taken (sweep)?           ──no──► wait
 4. CHoCH or IFVG fires on candle close?               ──no──► wait
@@ -155,6 +156,45 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 ```
 There is **no "structural target ≥ 4%" gate** — the default target is always 4%; structure only
 governs whether to extend *beyond* 4%.
+
+### 4.6 VWAP auto-bias (rule 17, automated)
+Ported from the TradingView **Volume Weighted Average Price** indicator (Pine v6):
+
+```
+vwap = Σ(src × volume) / Σ(volume)      since the anchor
+```
+
+with the Pine defaults — `src = hlc3`, anchor `"Session"` (a **daily** reset). Two deliberate
+adaptations:
+- **Anchor boundary** = the strategy's own `DayCloseHourRiyadh`, so the VWAP resets on the same
+  calendar the sessions and the prior-day 4H range already use (`VwapAnchor = WEEK` resets on
+  Monday instead).
+- **Volume source**: most Gold/CFD feeds report `real_volume = 0`, so the series falls back to
+  `tick_volume` when no real volume is present (Pine would raise *"No volume is provided by the
+  data vendor"*).
+
+**The rule** — decided **once per session, on its first bar**:
+
+| Session's first bar opens… | Bias armed |
+|---|---|
+| **above** the VWAP | **BUY** |
+| **below** the VWAP | **SELL** |
+| exactly on it | NONE (session skipped) |
+
+The VWAP it is compared against is the value **carried into the session** — computed from the bars
+*strictly before* the opening bar — so the opening bar itself cannot move the level it is being
+judged by.
+
+**Precedence**: `ForcedBias` (backtest override) → VWAP auto-bias → panel. The panel is still live:
+a click **after** the automatic decision wins for the rest of that session, because the decision is
+latched per session. Leaving a session disarms the bias back to `NONE`.
+
+Every decision prints `[SS] AUTO BIAS (VWAP): ASIA open 3412.55 vs VWAP 3408.10 -> BUY`, raises an
+alert, and is drawn on the chart as a blue level at the compared VWAP with the verdict text.
+
+> If `ForcedBias` is not `NONE`, the auto-bias is **disabled** — the EA alerts about this at
+> startup, because a saved tester `.set` can silently keep an old `ForcedBias` value.
+
 
 ---
 
@@ -237,6 +277,12 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | Asia | `DayCloseHourRiyadh` | 00:00 | Anchor for prior-day last-4h range |
 | Asia | `RangeLengthHours` | 4 | Rule 2 |
 | Timing | `EntryWindowMinutes` | 90 | Rule 3 (configurable) |
+| Bias | `BiasMode` | VWAP | Rule 17: `VWAP` = auto from the session open, `MANUAL` = panel only |
+| Bias | `VwapAnchor` | Day | VWAP reset period (Day = Riyadh day-close hour / Week = Monday) |
+| Bias | `VwapSource` | hlc3 | VWAP price source (Pine `src`) |
+| Bias | `ShowVwap` | true | Draw the VWAP curve |
+| Bias | `ColorVwap` | #2962FF | VWAP colour (TradingView blue) |
+| Bias | `VwapDrawBars` | 400 | Max VWAP segments drawn |
 | Structure | `SwingStrength` (N) | 2 | Sweep-target swing detection |
 | Structure | `ChochSwing` (N) | 1 | CHoCH reaction-high/low detection (smaller = catches faster breaks) |
 | Entry | `EntryModel` | CHoCH-first | CHoCH / IFVG / either |
@@ -272,7 +318,10 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | Visuals | `ShowDashboard` | true | On-chart status panel |
 
 ### Chart legend (what gets drawn)
-- **Dashboard panel** (top-left) — live state: bias, session, entry window, 4H range + values,
+- **VWAP curve** (blue #2962FF) — the anchored VWAP, plus a thicker level at the value the
+  session open was compared against, labelled with the verdict (`open ABOVE -> BUY`).
+- **Dashboard panel** (top-left) — live state: bias (+ auto/manual tag), VWAP & the open-vs-VWAP
+  comparison, session, entry window, 4H range + values,
   sweep met?, entry model met?, trade count/caps, position P/L, and a "what's blocking" note.
 - **Prev-Day 4H** (gold, **outline only**) — the rule-2 range box, confined to its own 4 hours
   (no rays, never extends into Asia). Reference for the trader's manual breakout check.
@@ -301,6 +350,7 @@ Sessions_Strategy/
 │   ├── SessionManager.mqh        ← session windows, Riyadh TZ, timing gate
 │   ├── BiasPanel.mqh             ← on-chart BUY/SELL/NONE buttons
 │   ├── Liquidity.mqh             ← swing detection, sweep, prior-day 4h range
+│   ├── Vwap.mqh                  ← anchored VWAP + auto-bias source (Section 4.6)
 │   ├── EntryModels.mqh           ← CHoCH + IFVG detection
 │   ├── DynamicTP.mqh             ← momentum/structure runner (Section 6)
 │   ├── RiskManager.mqh           ← sizing, BE, trade caps
@@ -316,7 +366,7 @@ Sessions_Strategy/
 
 - **Notion / TradingView documentation (rule 16)** is manual; EA provides only a CSV journal.
 - **Profit ×2 (rule 18)** is an accounting convention in the journal, not used in execution.
-- **Direction (rule 17)** is always your manual input.
+- **Direction (rule 17)** is the VWAP rule by default (Section 4.6); `BiasMode = MANUAL` hands it back to you.
 - One symbol per chart instance — **XAUUSD**.
 
 ---
@@ -363,7 +413,7 @@ Sessions are in **Riyadh time (GMT+3)**. The EA needs your broker's **server-tim
 
 | Mode | How | Use for |
 |------|-----|---------|
-| **Realistic (discretionary)** | **Visual mode ON.** Leave `ForcedBias = NONE`. When a session opens, click **BUY/SELL** on the panel. Clicks are detected by **polling the button state every tick** (the tester does *not* call `OnChartEvent`), so a click registers on the next tick — pausing, clicking, then resuming also works. | Reproducing how you'll actually trade it. |
+| **Realistic (discretionary)** | **Visual mode ON.** Leave `ForcedBias = NONE`. With `BiasMode = VWAP` the bias arms itself at each session open; with `BiasMode = MANUAL` (or to override the automatic choice) click **BUY/SELL** on the panel. Clicks are detected by **polling the button state every tick** (the tester does *not* call `OnChartEvent`), so a click registers on the next tick — pausing, clicking, then resuming also works. | Reproducing how you'll actually trade it. |
 | **Fast (mechanical)** | **Visual mode OFF.** Set **`ForcedBias = BUY`** (or `SELL`). The EA arms that bias for every session automatically. | Quickly checking the entry/risk/TP engine over long ranges, one direction at a time. |
 
 > `ForcedBias` is a **backtest-only** convenience — it applies one fixed direction to all sessions.
@@ -387,7 +437,8 @@ Sessions are in **Riyadh time (GMT+3)**. The EA needs your broker's **server-tim
 ### E. Common gotchas
 - **Wrong Gold symbol name** → "unknown symbol"/no trades. Use the exact name from Market Watch.
 - **Boxes at the wrong hours** → fix `BrokerToRiyadhHr` (Step B).
-- **No trades** → bias not armed (panel still `NONE` and `ForcedBias = NONE`), or no setup met the
+- **No trades** → bias not armed (`BiasMode = MANUAL` with the panel still `NONE`, or the auto-bias
+  found no VWAP data before the open — see the `[SS] AUTO BIAS` lines), or no setup met the
   sweep + CHoCH/IFVG conditions in the entry window. The Tester Journal and the chart marks tell you which.
 - **`ChochRetrace` fills** → a CHoCH limit that never fills waits on its BOS (per the BOS-trailing
   rule) until a newer BOS lifts it or the entry window closes. Lower `ChochRetrace` toward 0 for

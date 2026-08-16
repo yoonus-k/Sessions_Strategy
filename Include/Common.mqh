@@ -37,6 +37,29 @@ enum ENUM_SL_ANCHOR
    SL_ANCHOR_SWEEP_WICK = 1  // Sweep wick (session extreme of the sweeping leg)
   };
 
+//--- Where the session direction comes from (charter rule 17)
+enum ENUM_BIAS_MODE
+  {
+   BIAS_MODE_MANUAL = 0, // Trader arms the panel (charter rule 17)
+   BIAS_MODE_VWAP   = 1  // Auto: session opens above VWAP -> BUY, below -> SELL
+  };
+
+//--- VWAP anchor period (Pine "Session" = a daily reset)
+enum ENUM_VWAP_ANCHOR
+  {
+   VWAP_ANCHOR_DAY  = 0, // Reset each Riyadh day-close hour
+   VWAP_ANCHOR_WEEK = 1  // Reset each Monday
+  };
+
+//--- VWAP price source (Pine 'src', default hlc3)
+enum ENUM_VWAP_SOURCE
+  {
+   VWAP_SRC_HLC3  = 0, // (H+L+C)/3
+   VWAP_SRC_CLOSE = 1,
+   VWAP_SRC_HL2   = 2, // (H+L)/2
+   VWAP_SRC_OHLC4 = 3  // (O+H+L+C)/4
+  };
+
 //--- Per-trade outcome bookkeeping for session caps
 enum ENUM_TRADE_RESULT
   {
@@ -69,6 +92,10 @@ struct SSettings
    double            chochEntryRetrace;       // CHoCH limit retrace of breaking leg (0.25)
    double            preSweepHours;           // how far left of session open to look for the low/high to sweep
    double            detectPreHours;          // CHoCH/IFVG structure may reference bars this far before session open
+   // Bias source
+   ENUM_BIAS_MODE    biasMode;                // manual panel vs VWAP auto-bias
+   ENUM_VWAP_ANCHOR  vwapAnchor;              // VWAP reset period
+   ENUM_VWAP_SOURCE  vwapSource;              // VWAP price source (hlc3)
    // Risk
    double            riskPercent;             // 0.95
    ENUM_SL_ANCHOR    slAnchor;                // CHoCH leg extreme vs sweep wick
@@ -99,6 +126,10 @@ struct SSettings
 struct SStratState
   {
    ENUM_BIAS    bias;
+   bool         biasAuto;      // bias came from the VWAP rule, not the panel
+   double       vwap;          // live VWAP value
+   double       vwapAtOpen;    // VWAP carried into the session (decision input)
+   double       sessionOpen;   // open price of the session's first bar
    ENUM_SESSION session;
    bool         inWindow;
    bool         rangeValid;
