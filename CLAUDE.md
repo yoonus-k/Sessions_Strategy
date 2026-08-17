@@ -72,9 +72,11 @@ orders; **all order placement lives in the main file** (`PlaceOrder`, `OpenMarke
 poll bias buttons (PollClicks)          ← the tester never calls OnChartEvent; clicks are POLLED
 session-key change → wipe drawings, reset sweep
 ComputeRangeIfNeeded
-if position open  → g_dtp.Manage()      (every tick: BE, runner, trail)
+newBar = IsNewBar()                     ← evaluated ONCE, reused below
+if position open  → g_dtp.Manage()      (BE, runner, trail — every tick, or newBar
+                                         only when manageOnBarClose is set)
 CheckClosedPosition / ManagePending     (fill + cancel detection)
-if new bar:
+if newBar:
    if position OR pending open → TrailPendingOnNewBos() only; NO fresh detection
    else                        → EvaluateAndAct() + visuals
 RefreshDashboardLive()                  (every tick, so the panel stays live while paused)
@@ -84,6 +86,43 @@ Two invariants drive most of the code:
 - **One position at a time.** While a trade or a pending CHoCH limit is live, detection and setup
   drawing stop completely.
 - **Signals confirm on bar close**, but management (BE, runner, trail, dashboard) runs every tick.
+
+### Tick-model sensitivity (why two tester runs disagree)
+
+Entries confirm on bar close and barely move with the tick model. **Exits do.** Every threshold in
+`CDynamicTP::Manage` reads `POSITION_PROFIT` — the live price — so the model decides how many
+chances BE / partial / cap / trail get per bar: 1 under *Open prices only*, ~8 under *1 min OHLC*,
+thousands live. The same XAUUSD range moved PF 1.68 → 1.43 and the average winner 1,857 → 687
+between those two models, with the win rate *rising* 54.5% → 62.5% — early BE and partial exits.
+
+- **Live is finer than 1-min OHLC.** Open-prices-only numbers are unreachable; only *Every tick
+  based on real ticks* is a reference. README → "Tick model" has the full table.
+- `manageOnBarClose` (`InpManageOnBarClose`, default `true`) moves `Manage()` into the `newBar`
+  branch to remove most of this sensitivity, at the cost of intrabar BE protection. It is `true`
+  by default because the validated backtest ran that way; the trade-off is that BE arms only when
+  an M2 bar *opens* past the trigger.
+- **Never compare `Total Net Profit` across runs.** `LotForRisk` sizes off the live balance, so
+  results compound; compare Profit Factor and Expected Payoff as a % of balance instead.
+
+### Shipped defaults = the validated backtest configuration
+
+The `input` defaults mirror the 1,353-trade real-tick run (XAUUSD M2, 2025-01-02 → 2026-08-14,
+PF 1.60, 14.07% win rate on decisive trades, 9.89:1 RR, 25.1% normalised drawdown). Two of them
+deliberately switch code paths **off**, so don't "fix" the resulting dead code:
+
+- `defaultTargetPercent == maxTargetPercent == 5.0`. `Manage()` tests the cap at
+  `DynamicTP.mqh:135` **before** the partial (138) and the trail (155), so it always closes and
+  returns first. The partial, the structure trail, `Momentum()`, `NearestSwing()` and the
+  opposing-CHoCH exit are all unreachable at these settings. Raising `maxTargetPercent` above
+  `defaultTargetPercent` is what re-enables them.
+- `usePartialTP = false` — off independently of the above.
+- `breakEvenAtPercent = 0.25` with `riskPercent = 0.5` puts break-even at **≈0.5R**. It is a
+  hair trigger and it dominates the outcome distribution: 692 of 1,353 trades (51%) closed at
+  break-even. Whether it earns its keep is unresolved — at 9.89:1 RR it only needs 9.2% of those
+  scratches to have been eventual winners to be net negative.
+- `useLondon = false` — the London session has never been backtested.
+
+Changing an `input` default does **not** change the user's tester runs; see the `.set` note above.
 
 ### Module responsibilities
 
@@ -104,8 +143,9 @@ Two invariants drive most of the code:
 
 Three windows, all in Riyadh time: **Asia 03:00–06:00**, **London 09:00–12:00**, **NY 15:00–18:00**.
 London is **not in the charter** — it is an addition gated by `useLondon` (`InpUseLondon`, default
-`true`); when false, `CurrentSession()` never returns `SESSION_LONDON` and the session is invisible
-to the rest of the EA. Asia and NY have no such switch.
+`false`); when false, `CurrentSession()` never returns `SESSION_LONDON` and the session is invisible
+to the rest of the EA. Asia and NY have no such switch. **London has never been backtested** — the
+validated run is Asia + NY only.
 
 Adding or changing a session touches exactly three things: the `ENUM_SESSION` value, the ordered
 checks in `CSessionManager::CurrentSession`, and the `StartMinOf` / `EndMinOf` pair every other
@@ -194,8 +234,8 @@ of that decision — correct, complete, and deliberately **never called**. Leave
 
 ## Conventions
 
-- Everything in code and logs is **English** — comments, journal lines, alerts, dashboard text. The
-  user communicates in **Arabic**; reply in Arabic.
+- Everything is **English** — code, comments, journal lines, alerts, dashboard text, and replies to
+  the user.
 - Every order path prints an `[SS]` line on both success and failure, and raises an `Alert()` for
   opens and failures. The user debugs from these, so keep new paths instrumented the same way.
 - A new tunable means three edits: a field in `SSettings` (`Common.mqh`), an `input` in the main

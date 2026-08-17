@@ -19,12 +19,13 @@ click a bias button (**BUY / SELL / NONE**). The EA then waits for price to **sw
 opposing liquidity** — for a buy, price simply trades **below** a prior low; for a sell, **above**
 a prior high (just taking the level is enough). After the sweep, it requires a **CHoCH**
 (close-confirmed) or an **IFVG** reaction as the entry trigger. If that confirmation appears
-within a **configurable entry window** (default 90 min) from the session open, it opens a
-position sized to a fixed **0.95% risk**, with stop **at the sweep wick**. The **default target
-is 4%**; from there the exit is managed **dynamically** — the trade can extend toward the nearest
-structural high/low, up to a **10% cap**, while momentum supports continuation. Stop moves to
-break-even at **+2%**, and the EA never auto-closes before **+4%**. Per session: **stop after the
-first win**, otherwise up to **two** trades; the next session (same day or next day) starts fresh.
+within a **configurable entry window** (default 120 min) from the session open, it opens a
+position sized to a fixed **0.5% risk**, with stop **at the sweep wick**. The **default target
+is 5%**; from there the exit is managed **dynamically** — the trade can extend toward the nearest
+structural high/low, up to the **cap**, while momentum supports continuation. Stop moves to
+break-even at **+0.25%** (≈0.5R), and the EA never auto-closes before the default target. Per
+session: **stop after the first win**, otherwise up to **three** trades; the next session (same day
+or next day) starts fresh.
 
 ---
 
@@ -36,11 +37,11 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 | **Timezone** | Sessions in **Riyadh local time (GMT+3, no DST)**; converted from broker server time via offset. |
 | **Bias input** | **Automatic from VWAP** by default (`BiasMode = VWAP`): the session opens above the VWAP -> BUY, below -> SELL. The on-chart BUY / SELL / NONE buttons remain, as a manual override and as the sole source when `BiasMode = MANUAL`. |
 | **Entry confirmation** | **CHoCH** (close-confirmed break) → **pending LIMIT at 25% retrace of the breaking leg**; **IFVG** secondary → market entry. First valid trigger after the sweep wins. |
-| **Entry window** | **Configurable minutes** from session open (default 90). |
+| **Entry window** | **Configurable minutes** from session open (default 120). |
 | **Sweep** | Price simply **takes the level** (trades beyond the prior high/low). No close-back-inside required — the *entry model* provides the reversal confirmation. |
-| **Default target** | **4%** by default, regardless of structure. Extension beyond 4% is decided by nearest high/low + momentum, capped at 10%. |
+| **Default target** | **5%** by default, regardless of structure. Extension is decided by nearest high/low + momentum, capped at `MaxTargetPercent` — which ships **equal** to the default, disabling extension entirely (§6.6). |
 | **Stop loss** | **At the entry pattern's own leg extreme** by default (`SLAnchor`): CHoCH → the breaking-leg extreme; IFVG → the extreme of the reclaim leg since the zone formed. The `SWEEP_WICK` option anchors at the session extreme instead. Optional small buffer. |
-| **Session caps** | Stop after **1 win**; otherwise up to **2** trades. No daily cap — next session continues normally, same day or next. |
+| **Session caps** | Stop after **1 win**; otherwise up to **3** trades (charter says 2). No daily cap — next session continues normally, same day or next. |
 | **Rule 14** | EA simply never auto-closes before +4% (no manual-block logic). |
 | **TP > 10%** | Cap at 10%, always trade if valid. |
 | **Symbol** | **XAUUSD (Gold) only.** |
@@ -51,15 +52,15 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 
 | # | Rule (charter) | EA implementation |
 |---|----------------|-------------------|
-| 1 | **Approved sessions** — Asia 03:00–06:00, NY 15:00–18:00 | Windows in **Riyadh time**. A third window, **London 09:00–12:00**, is added on top of the charter and is toggled with `UseLondon` (default **on**); set it to `false` to trade the charter's two sessions only. |
+| 1 | **Approved sessions** — Asia 03:00–06:00, NY 15:00–18:00 | Windows in **Riyadh time**. A third window, **London 09:00–12:00**, is added on top of the charter and is toggled with `UseLondon` (default **off**); set it to `true` to trade it as well. It has never been backtested. |
 | 2 | **Asia condition** — price must exit the prior 4-hour range | The range box (last 4h of the previous day) is **drawn for reference only**, confined to its own 4 hours. The breakout check is the **trader's manual job** — the EA does not gate entries on it. |
-| 3 | **Entry timing** — only within the first ~1.5 hours | Hard gate via input `EntryWindowMinutes` (default 90). No entry after. |
+| 3 | **Entry timing** — only within the first ~1.5 hours | Hard gate via input `EntryWindowMinutes` (default 120). No entry after. |
 | 4 | **Sell** — sweep prior **highs** first | SELL requires price to trade **above** the nearest prior swing high. |
 | 5 | **Buy** — sweep prior **lows** first | BUY requires price to trade **below** the nearest prior swing low. |
 | 6 | **Entry model** — IFVG or clear BOS, candle close | **CHoCH**: break confirmed on candle close, then a **pending LIMIT at 25% retrace of the breaking leg** (no chasing a long break bar). **IFVG**: market entry on the close-confirmed reclaim. |
 | 7 | **Protection** — at **+2%**, SL → entry | Floating-gain monitor moves SL to break-even. |
 | 8 | **Target** — prior high/low, clear reading | Default 4%; **dynamic engine** (Section 6) extends to structural levels by momentum, 10% cap. |
-| 9 | **Risk** — fixed **0.95%** of capital | Lot size = 0.95% equity ÷ (entry-to-SL distance). |
+| 9 | **Risk** — fixed **0.95%** of capital | Lot size = `RiskPercent` ÷ (entry-to-SL distance). The charter says 0.95%; the shipped default is **0.5%**, matching the validated backtest. |
 | 10 | **Trades/session** — max **2** (losing) / **1** (winning) | Stop after **1 win**; otherwise up to **2**, then stop for that session. |
 | 11 | **Max RR** — target ≤ **10%** | Hard 10% cap on the runner. |
 | 12 | **Min RR** — target ≥ **4%** | **Default target is 4%**, so every trade meets the minimum by construction. |
@@ -153,10 +154,10 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 4. CHoCH or IFVG fires on candle close?               ──no──► wait
 5a. CHoCH → place LIMIT at 25% retrace of breaking leg (BOS trailing rules)
 5b. IFVG  → enter at market
-6. On fill → size 0.95% risk, SL at pattern leg, TP cap 10%, arm dynamic runner
+6. On fill → size RiskPercent, SL at pattern leg, TP at the cap, arm dynamic runner
 ```
-There is **no "structural target ≥ 4%" gate** — the default target is always 4%; structure only
-governs whether to extend *beyond* 4%.
+There is **no "structural target ≥ default" gate** — the default target always applies; structure
+only governs whether to extend *beyond* it, and only when `MaxTargetPercent > DefaultTargetPercent`.
 
 ### 4.6 VWAP auto-bias (rule 17, automated)
 Ported from the TradingView **Volume Weighted Average Price** indicator (Pine v6):
@@ -201,10 +202,10 @@ alert, and is drawn on the chart as a blue level at the compared VWAP with the v
 
 ## 5. Risk & sizing
 
-- **Sizing**: lots = `(Balance × 0.95%) / lossPerLot`, where `lossPerLot` is the broker's own
+- **Sizing**: lots = `(Balance × RiskPercent) / lossPerLot`, where `lossPerLot` is the broker's own
   `OrderCalcProfit(entry → SL, 1.0 lot)` — **not** `|entry − SL| × tickValue`, which some brokers
   report in scaled units and which inflated the size ~100×. Rounded down to the volume step, so
-  realized risk never exceeds 0.95%; if even the broker minimum lot would over-risk, the trade
+  realized risk never exceeds `RiskPercent`; if even the broker minimum lot would over-risk, the trade
   is refused (`lot size = 0`).
 - **Stop loss** (`SLAnchor`): default **entry-pattern leg** — the extreme of the leg that
   produced the entry, plus optional `SLBufferPoints`:
@@ -263,11 +264,18 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 
 ### 6.5 Charter compliance
 - **Never closes before 4%** (rule 14): the runner and partials only activate at/after +4%; before that the trail never sits below break-even.
-- **Min 4% / Max 10%** (rules 11, 12): default target is 4%; hard cap is 10%.
+- **Min default / Max cap** (rules 11, 12): `DefaultTargetPercent` and `MaxTargetPercent`. **They ship equal (5% / 5%)** — see the warning under §6.6.
 - **Target = prior high/low** (rule 8): every *extension* target is a real structural swing; momentum only decides whether to hold to the next one.
 
 ### 6.6 Tunable behavior
-- `UsePartialTP` (default **true**) + `PartialPercent` (default **50%**): close part at +4% to lock the minimum, ride the rest on the trail. Set `false` to ride the full position.
+- `UsePartialTP` (default **false**) + `PartialPercent` (default **50%**): close part at the default target to lock the minimum, ride the rest on the trail. Set `true` to bank a partial.
+
+> **Equal targets disable the runner.** `DynamicTP::Manage` tests the cap *before* the partial and
+> the trail (`DynamicTP.mqh:132-147`), so whenever `DefaultTargetPercent == MaxTargetPercent` the
+> function closes the position and returns before either can run. The shipped defaults are 5% / 5%,
+> which is why the validated backtest shows a hard wall at +5% and no trade above +5.37%. To use the
+> partial or the structure trail at all, set `MaxTargetPercent` strictly greater than
+> `DefaultTargetPercent`.
 
 ---
 
@@ -277,13 +285,13 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 |-------|-------|---------|-------|
 | General | `WorkingTimeframe` | M2 | Primary analysis TF |
 | Sessions | `AsiaStart` / `AsiaEnd` | 03:00 / 06:00 | Riyadh time |
-| Sessions | `UseLondon` | true | Enable the London session (off = charter's two sessions only) |
+| Sessions | `UseLondon` | false | Enable the London session (never backtested) |
 | Sessions | `LondonStart` / `LondonEnd` | 09:00 / 12:00 | Riyadh time; ignored when `UseLondon = false` |
 | Sessions | `NYStart` / `NYEnd` | 15:00 / 18:00 | Riyadh time |
 | Sessions | `BrokerToRiyadhOffsetHours` | TBD | Server → Riyadh |
 | Asia | `DayCloseHourRiyadh` | 00:00 | Anchor for prior-day last-4h range |
 | Asia | `RangeLengthHours` | 4 | Rule 2 |
-| Timing | `EntryWindowMinutes` | 90 | Rule 3 (configurable) |
+| Timing | `EntryWindowMinutes` | 120 | Rule 3 (configurable) |
 | Bias | `BiasMode` | VWAP | Rule 17: `VWAP` = auto from the session open, `MANUAL` = panel only |
 | Bias | `VwapAnchor` | Day | VWAP reset period (Day = Riyadh day-close hour / Week = Monday) |
 | Bias | `VwapSource` | hlc3 | VWAP price source (Pine `src`) |
@@ -296,19 +304,20 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | Entry | `ChochRetrace` | 0.25 | Limit at 25% retrace of breaking leg |
 | Entry | `PreSweepHours` | 8.0 | Hours left of session open to find the low/high to sweep |
 | Entry | `DetectPreHours` | 2.0 | CHoCH/IFVG structure sees this many hours before the open (0 = session only) |
-| Risk | `RiskPercent` | 0.95 | Rule 9 |
+| Risk | `RiskPercent` | 0.5 | Rule 9 (charter says 0.95; 0.5 is the validated default) |
 | Risk | `SLAnchor` | CHoCH leg | SL at breaking-leg extreme (CHoCH) or sweep wick |
 | Risk | `SLBufferPoints` | 0 | Pad beyond anchor |
-| Risk | `BreakEvenAtPercent` | 2.0 | Rule 7 |
-| TP | `DefaultTargetPercent` | 4.0 | Rule 12 default |
-| TP | `MaxTargetPercent` | 10.0 | Rule 11 cap |
-| TP | `UsePartialTP` | true | Section 6.6 |
+| Risk | `BreakEvenAtPercent` | 0.25 | Rule 7 — ≈0.5R at `RiskPercent = 0.5`. Hair-trigger; see **Tick model** |
+| TP | `DefaultTargetPercent` | 5.0 | Rule 12 default |
+| TP | `MaxTargetPercent` | 5.0 | Rule 11 cap — **equal to the default target, which disables the partial and the trail** |
+| TP | `UsePartialTP` | false | Section 6.6 |
 | TP | `PartialPercent` | 50 | Closed at +4% |
 | TP | `MomentumBodyATR` | 1.3 | Displacement |
 | TP | `MomentumStallBars` | 3 | Stall/progress window |
 | TP | `AtrContractionFactor` | 0.6 | Exhaustion |
 | TP | `TrailPadPoints` | broker-tuned | Structure-trail pad |
-| Caps | `MaxTradesPerSession` | 2 | Rule 10 |
+| Cadence | `ManageOnBarClose` | true | Run the management stack on bar close only — see **Tick model** |
+| Caps | `MaxTradesPerSession` | 3 | Rule 10 (charter says 2) |
 | Caps | `StopAfterFirstWin` | true | Rule 10 |
 | Logging | `WriteTradeJournalCSV` | true | Rule 16 helper |
 | Logging | `Debug` | false | Per-bar detection trace to the Experts log |
@@ -426,6 +435,40 @@ Sessions are in **Riyadh time (GMT+3)**. The EA needs your broker's **server-tim
 
 > `ForcedBias` is a **backtest-only** convenience — it applies one fixed direction to all sessions.
 > Leave it `NONE` for live trading and use the panel.
+
+#### Tick model — why the same range gives very different results
+
+Entries confirm on bar close and are essentially model-independent. **Exits are not.** The whole
+management stack — break-even at +2%, the partial at +4%, the +10% cap, the structure trail and the
+opposing-CHoCH exit — reads `POSITION_PROFIT`, i.e. the *live* price, and `OnTick` calls it on every
+tick. So the tick model decides how often those thresholds get a chance to fire:
+
+| Model | `OnTick` calls per M2 bar | Effect on exits |
+|-------|---------------------------|-----------------|
+| Open prices only | 1, at the bar open | BE/partial/trail almost never fire intrabar — winners run far |
+| 1 minute OHLC | ~8, including each M1 high and low | thresholds fire on intrabar extremes — more BE and +4% exits |
+| Every tick (real ticks) | thousands | closest to live |
+
+Measured on the same XAUUSD range, Open-prices-only vs 1-minute-OHLC moved the average winner from
+1,857 to 687 and the profit factor from 1.68 to 1.43, while the *win rate rose* from 54.5% to 62.5% —
+the signature of BE and the partial triggering early. Balance drawdown went from 18.0% to 26.3%.
+
+Two consequences:
+
+- **Live is finer than 1-minute OHLC, not coarser.** Open-prices-only results are unreachable in
+  live trading; treat that model as a parameter-screening tool only. **Every tick based on real
+  ticks** is the only reference number.
+- **Never compare `Total Net Profit` across runs.** `LotForRisk` sizes off the live balance, so the
+  test compounds; a small expectancy difference becomes a 3× profit difference over ~1400 trades.
+  Compare **Profit Factor** and **Expected Payoff as a % of balance**.
+
+`ManageOnBarClose = true` moves the management stack into the new-bar branch, which largely removes
+the tick-model sensitivity above and makes a backtest directly believable. The trade-off is real:
+BE and the +10% cap are then evaluated once every 2 minutes, so intrabar break-even protection is
+lost. The +10% cap itself is still safe — it is also a broker-side TP set at order time — but the
+partial and the trail will lag. Residual model sensitivity remains either way, because the tester
+resolves broker-side SL/TP fills from the bar's OHLC path, and an M2 bar carries less path
+information than two M1 bars.
 
 ### D. Read the results
 - **Visual chart:** swing dots → sweep level → CHoCH/IFVG marks → entry/SL/TP arrows show exactly

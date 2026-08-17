@@ -101,22 +101,26 @@ struct SSettings
    ENUM_VWAP_ANCHOR  vwapAnchor;              // VWAP reset period
    ENUM_VWAP_SOURCE  vwapSource;              // VWAP price source (hlc3)
    // Risk
-   double            riskPercent;             // 0.95
+   double            riskPercent;             // 0.5
    ENUM_SL_ANCHOR    slAnchor;                // CHoCH leg extreme vs sweep wick
    double            slBufferPoints;          // pad beyond wick
-   double            breakEvenAtPercent;      // 2.0
+   double            breakEvenAtPercent;      // 0.25  (~0.5R at riskPercent 0.5)
    // Targets
-   double            defaultTargetPercent;    // 4.0
-   double            maxTargetPercent;        // 10.0
-   bool              usePartialTP;
+   double            defaultTargetPercent;    // 5.0
+   double            maxTargetPercent;        // 5.0 - equal to the default target, so the
+                                              // partial and the structure trail below the
+                                              // cap check in DynamicTP are unreachable
+   bool              usePartialTP;            // false
    double            partialPercent;          // 50
    // Momentum
    double            momentumBodyATR;         // 1.3
    int               momentumStallBars;       // 3
    double            atrContractionFactor;    // 0.6
    double            trailPadPoints;
+   // Management cadence
+   bool              manageOnBarClose;        // run DynamicTP on new bar only (default true)
    // Caps
-   int               maxTradesPerSession;     // 2
+   int               maxTradesPerSession;     // 3
    bool              stopAfterFirstWin;       // true
    bool              tradeMonday;             // allow trading on Monday
    bool              tradeFriday;             // allow trading on Friday

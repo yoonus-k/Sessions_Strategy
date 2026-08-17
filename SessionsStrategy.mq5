@@ -33,12 +33,12 @@ input group "Timezone / Sessions (Riyadh local time)"
 input double          InpBrokerToRiyadhHr   = 0.0;         // Server -> Riyadh offset (hours)
 input string          InpAsiaStart          = "03:00";     // Asia session start
 input string          InpAsiaEnd            = "06:00";     // Asia session end
-input bool            InpUseLondon          = true;        // Enable the London session
+input bool            InpUseLondon          = false;       // Enable the London session
 input string          InpLondonStart        = "09:00";     // London session start
 input string          InpLondonEnd          = "12:00";     // London session end
 input string          InpNYStart            = "15:00";     // NY session start
 input string          InpNYEnd              = "18:00";     // NY session end
-input int             InpEntryWindowMinutes = 90;          // Entry window from open (min)
+input int             InpEntryWindowMinutes = 120;         // Entry window from open (min)
 
 input group "Bias source (VWAP auto-bias)"
 input ENUM_BIAS_MODE   InpBiasMode          = BIAS_MODE_VWAP;  // Bias source: manual panel / VWAP at session open
@@ -61,15 +61,15 @@ input double          InpPreSweepHours      = 8.0;         // Look this many hou
 input double          InpDetectPreHours     = 2.0;         // CHoCH/IFVG structure sees this many hours before session open (0 = session bars only)
 
 input group "Risk"
-input double          InpRiskPercent        = 0.95;        // Risk per trade (% capital)
+input double          InpRiskPercent        = 0.5;         // Risk per trade (% capital)
 input ENUM_SL_ANCHOR  InpSLAnchor           = SL_ANCHOR_CHOCH_LEG; // SL anchor (CHoCH leg extreme / sweep wick)
 input double          InpSLBufferPoints     = 0;           // SL pad beyond wick (points)
-input double          InpBreakEvenAtPercent = 2.0;         // Move SL to BE at (%)
+input double          InpBreakEvenAtPercent = 0.25;        // Move SL to BE at (%)
 
 input group "Targets"
-input double          InpDefaultTargetPct   = 4.0;         // Default target (%)
-input double          InpMaxTargetPct       = 10.0;        // Hard cap (%)
-input bool            InpUsePartialTP       = true;        // Partial close at default target
+input double          InpDefaultTargetPct   = 5.0;         // Default target (%)
+input double          InpMaxTargetPct       = 5.0;         // Hard cap (%)
+input bool            InpUsePartialTP       = false;       // Partial close at default target
 input double          InpPartialPercent     = 50.0;        // Partial size (%)
 
 input group "Momentum runner"
@@ -78,8 +78,11 @@ input int             InpMomentumStallBars  = 3;           // Stall / progress w
 input double          InpAtrContractionFac  = 0.6;         // Exhaustion (ATR < x*ATR@entry)
 input double          InpTrailPadPoints     = 0;           // Structure-trail pad (points)
 
+input group "Management cadence"
+input bool            InpManageOnBarClose   = true;        // Manage position on bar close only (tick-model independent)
+
 input group "Session caps"
-input int             InpMaxTradesPerSession= 2;           // Max trades per session
+input int             InpMaxTradesPerSession= 3;           // Max trades per session
 input bool            InpStopAfterFirstWin  = true;        // Stop after first win
 input bool            InpTradeMonday        = true;        // Allow trading on Monday
 input bool            InpTradeFriday        = true;        // Allow trading on Friday
@@ -191,6 +194,7 @@ void BuildSettings()
    g_s.momentumStallBars     =InpMomentumStallBars;
    g_s.atrContractionFactor  =InpAtrContractionFac;
    g_s.trailPadPoints        =InpTrailPadPoints;
+   g_s.manageOnBarClose      =InpManageOnBarClose;
    g_s.maxTradesPerSession   =InpMaxTradesPerSession;
    g_s.stopAfterFirstWin     =InpStopAfterFirstWin;
    g_s.tradeMonday           =InpTradeMonday;
@@ -996,15 +1000,21 @@ void OnTick()
 
    g_session.ComputeRangeIfNeeded(now);
 
-   // manage any open position every tick (BE, runner, caps)
-   if(g_openTicket!=0)
+   // Evaluated once here: management may need it before the detection branch.
+   bool newBar=IsNewBar();
+
+   // Manage any open position (BE, runner, caps). Every tick by default, which
+   // is how it behaves live. With manageOnBarClose the decisions are taken on
+   // the new bar's open only, so the Strategy Tester's tick model stops moving
+   // the result — see README "Tick model" for the trade-off.
+   if(g_openTicket!=0 && (newBar || !g_s.manageOnBarClose))
       g_dtp.Manage(g_trade,g_risk,g_entry);
 
    CheckClosedPosition();
    ManagePending();   // detect CHoCH limit fills / cancel on timeout
 
    // bar-close work
-   if(IsNewBar())
+   if(newBar)
      {
       // live 4H range box during its 20:00->00:00 window (outside sessions);
       // it persists and the Asia session reuses the same object key

@@ -107,7 +107,8 @@ public:
 
    void Clear(){ m_active=false; m_ticket=0; }
 
-   //--- Called every new bar while a position is open
+   //--- Called while a position is open: every tick, or on the new bar only
+   //    when settings.manageOnBarClose is set (see OnTick).
    void Manage(CTrade &trade,CRiskManager &rm,CEntryModels &em)
      {
       if(!m_active) return;
