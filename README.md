@@ -13,7 +13,8 @@ momentum-aware take-profit**) on top of that bias.
 
 ## 1. Strategy in one paragraph
 
-Trade only during two approved sessions (**Riyadh local time, GMT+3**). At each session open you
+Trade only during the approved sessions (**Riyadh local time, GMT+3**) — Asia, London and NY,
+with London switchable via `UseLondon`. At each session open you
 click a bias button (**BUY / SELL / NONE**). The EA then waits for price to **sweep the nearest
 opposing liquidity** — for a buy, price simply trades **below** a prior low; for a sell, **above**
 a prior high (just taking the level is enough). After the sweep, it requires a **CHoCH**
@@ -50,7 +51,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 
 | # | Rule (charter) | EA implementation |
 |---|----------------|-------------------|
-| 1 | **Approved sessions** — Asia 03:00–06:00, NY 15:00–18:00 | Two windows in **Riyadh time**. |
+| 1 | **Approved sessions** — Asia 03:00–06:00, NY 15:00–18:00 | Windows in **Riyadh time**. A third window, **London 09:00–12:00**, is added on top of the charter and is toggled with `UseLondon` (default **on**); set it to `false` to trade the charter's two sessions only. |
 | 2 | **Asia condition** — price must exit the prior 4-hour range | The range box (last 4h of the previous day) is **drawn for reference only**, confined to its own 4 hours. The breakout check is the **trader's manual job** — the EA does not gate entries on it. |
 | 3 | **Entry timing** — only within the first ~1.5 hours | Hard gate via input `EntryWindowMinutes` (default 90). No entry after. |
 | 4 | **Sell** — sweep prior **highs** first | SELL requires price to trade **above** the nearest prior swing high. |
@@ -200,7 +201,11 @@ alert, and is drawn on the chart as a blue level at the compared VWAP with the v
 
 ## 5. Risk & sizing
 
-- **Sizing**: lots = `(Equity × 0.95%) / (|entry − SL| × tickValue)`. Never exceeds 0.95%.
+- **Sizing**: lots = `(Balance × 0.95%) / lossPerLot`, where `lossPerLot` is the broker's own
+  `OrderCalcProfit(entry → SL, 1.0 lot)` — **not** `|entry − SL| × tickValue`, which some brokers
+  report in scaled units and which inflated the size ~100×. Rounded down to the volume step, so
+  realized risk never exceeds 0.95%; if even the broker minimum lot would over-risk, the trade
+  is refused (`lot size = 0`).
 - **Stop loss** (`SLAnchor`): default **entry-pattern leg** — the extreme of the leg that
   produced the entry, plus optional `SLBufferPoints`:
   - **CHoCH** → the breaking-leg extreme (below the leg low for a buy / above the leg high
@@ -272,6 +277,8 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 |-------|-------|---------|-------|
 | General | `WorkingTimeframe` | M2 | Primary analysis TF |
 | Sessions | `AsiaStart` / `AsiaEnd` | 03:00 / 06:00 | Riyadh time |
+| Sessions | `UseLondon` | true | Enable the London session (off = charter's two sessions only) |
+| Sessions | `LondonStart` / `LondonEnd` | 09:00 / 12:00 | Riyadh time; ignored when `UseLondon = false` |
 | Sessions | `NYStart` / `NYEnd` | 15:00 / 18:00 | Riyadh time |
 | Sessions | `BrokerToRiyadhOffsetHours` | TBD | Server → Riyadh |
 | Asia | `DayCloseHourRiyadh` | 00:00 | Anchor for prior-day last-4h range |
@@ -307,7 +314,7 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | Logging | `Debug` | false | Per-bar detection trace to the Experts log |
 | Visuals | `ShowVisuals` | true | Range/session boxes |
 | Visuals | `ShowSignals` | true | Sweep / CHoCH / IFVG / trade levels |
-| Visuals | `ColorRange / Asia / NY` | gold / blue / red | Box colors |
+| Visuals | `ColorRange / Asia / London / NY` | gold / blue / sea-green / red | Box colors |
 | Visuals | `ColorChoch / Ifvg / Sweep` | aqua / orchid / khaki | Signal colors |
 | Visuals | `ShowSwings` | true | Detected swing-high/low dots |
 | Visuals | `ColorSwingHi / Lo` | tomato / green | Swing dot colors |
@@ -325,7 +332,7 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
   sweep met?, entry model met?, trade count/caps, position P/L, and a "what's blocking" note.
 - **Prev-Day 4H** (gold, **outline only**) — the rule-2 range box, confined to its own 4 hours
   (no rays, never extends into Asia). Reference for the trader's manual breakout check.
-- **ASIA / NY boxes** (blue / red, **outline only**) — developing session high–low (no fill, so it no longer covers the candles).
+- **ASIA / LONDON / NY boxes** (blue / sea-green / red, **outline only**) — developing session high–low (no fill, so it no longer covers the candles).
 - **Swing dots** (tomato highs / green lows) — the structure skeleton.
 - **Sweep target** (gold `low to sweep` → khaki `low SWEPT`) — the single marked level, trailing to the newest swing.
 - **Newest FVG / IFVG** (gray = FVG, orchid = inverted IFVG) — only the most recent zone
@@ -394,8 +401,9 @@ Sessions are in **Riyadh time (GMT+3)**. The EA needs your broker's **server-tim
   - Server is **GMT+3** → offset **0**
   - Server is **GMT+2** → offset **1**
   - Server is **GMT** → offset **3**
-- **Verify visually:** on an M2 XAUUSD chart the **ASIA box must start at 03:00** and **NY at 15:00**
-  Riyadh time. If the boxes are shifted, adjust the offset until they line up.
+- **Verify visually:** on an M2 XAUUSD chart the **ASIA box must start at 03:00**, **LONDON at
+  09:00** and **NY at 15:00** Riyadh time. If the boxes are shifted, adjust the offset until they
+  line up.
 
 ### C. Backtest in the Strategy Tester
 1. Open the tester: **View → Strategy Tester** (Ctrl+R).

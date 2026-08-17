@@ -29,6 +29,22 @@ private:
       return(StringFormat("%04d%02d%02d",dt.year,dt.mon,dt.day));
      }
 
+   //--- Session bounds in Riyadh minutes-from-midnight. Every window query
+   //    below goes through these two, so adding a session means touching
+   //    CurrentSession() and these — nothing else.
+   int               StartMinOf(const ENUM_SESSION ses) const
+     {
+      if(ses==SESSION_ASIA)   return(m_s.asiaStartMin);
+      if(ses==SESSION_LONDON) return(m_s.londonStartMin);
+      return(m_s.nyStartMin);
+     }
+   int               EndMinOf(const ENUM_SESSION ses) const
+     {
+      if(ses==SESSION_ASIA)   return(m_s.asiaEndMin);
+      if(ses==SESSION_LONDON) return(m_s.londonEndMin);
+      return(m_s.nyEndMin);
+     }
+
    //--- Riyadh midnight of the day containing 'riyadh'
    datetime          RiyadhMidnight(const datetime riyadh) const
      {
@@ -50,6 +66,8 @@ public:
      {
       int m=RiyadhMinuteOfDay(ToRiyadh(serverNow,m_s));
       if(m>=m_s.asiaStartMin && m<m_s.asiaEndMin) return(SESSION_ASIA);
+      if(m_s.useLondon &&
+         m>=m_s.londonStartMin && m<m_s.londonEndMin) return(SESSION_LONDON);
       if(m>=m_s.nyStartMin   && m<m_s.nyEndMin)   return(SESSION_NY);
       return(SESSION_NONE);
      }
@@ -59,7 +77,7 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return(false);
-      int start=(ses==SESSION_ASIA)?m_s.asiaStartMin:m_s.nyStartMin;
+      int start=StartMinOf(ses);
       int m=RiyadhMinuteOfDay(ToRiyadh(serverNow,m_s));
       return(m>=start && m<start+m_s.entryWindowMinutes);
      }
@@ -69,8 +87,7 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return("");
-      string tag=(ses==SESSION_ASIA)?"ASIA":"NY";
-      return(DayKey(ToRiyadh(serverNow,m_s))+"-"+tag);
+      return(DayKey(ToRiyadh(serverNow,m_s))+"-"+SessionName(ses));
      }
 
    //--- Server time of the active session's open
@@ -78,9 +95,8 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return(0);
-      int start=(ses==SESSION_ASIA)?m_s.asiaStartMin:m_s.nyStartMin;
       datetime riyadhMidnight=RiyadhMidnight(ToRiyadh(serverNow,m_s));
-      return(FromRiyadh(riyadhMidnight+start*60,m_s));
+      return(FromRiyadh(riyadhMidnight+StartMinOf(ses)*60,m_s));
      }
 
    //+------------------------------------------------------------------+
@@ -205,9 +221,8 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return(0);
-      int end=(ses==SESSION_ASIA)?m_s.asiaEndMin:m_s.nyEndMin;
       datetime riyadhMidnight=RiyadhMidnight(ToRiyadh(serverNow,m_s));
-      return(FromRiyadh(riyadhMidnight+end*60,m_s));
+      return(FromRiyadh(riyadhMidnight+EndMinOf(ses)*60,m_s));
      }
   };
 

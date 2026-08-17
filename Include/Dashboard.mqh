@@ -81,8 +81,7 @@ public:
             +" "+Px(s.vwapAtOpen);
       Label(2,vw,s.vwap>0?cInfo:cWait);
 
-      string ses=(s.session==SESSION_ASIA)?"ASIA":(s.session==SESSION_NY)?"NY":"-";
-      Label(3,"Session     : "+ses+"   Window: "+YN(s.inWindow),
+      Label(3,"Session     : "+SessionName(s.session)+"   Window: "+YN(s.inWindow),
             s.session==SESSION_NONE?cInfo:(s.inWindow?cGood:cWait));
 
       // 4H range values are reference only - the breakout check is manual

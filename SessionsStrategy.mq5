@@ -33,6 +33,9 @@ input group "Timezone / Sessions (Riyadh local time)"
 input double          InpBrokerToRiyadhHr   = 0.0;         // Server -> Riyadh offset (hours)
 input string          InpAsiaStart          = "03:00";     // Asia session start
 input string          InpAsiaEnd            = "06:00";     // Asia session end
+input bool            InpUseLondon          = true;        // Enable the London session
+input string          InpLondonStart        = "09:00";     // London session start
+input string          InpLondonEnd          = "12:00";     // London session end
 input string          InpNYStart            = "15:00";     // NY session start
 input string          InpNYEnd              = "18:00";     // NY session end
 input int             InpEntryWindowMinutes = 90;          // Entry window from open (min)
@@ -89,6 +92,7 @@ input group "Visuals"
 input bool            InpShowVisuals        = true;        // Draw range/session boxes
 input color           InpColorRange         = clrGoldenrod;// Prev-day 4H range
 input color           InpColorAsia          = clrDodgerBlue;// Asia session range
+input color           InpColorLondon        = clrMediumSeaGreen;// London session range
 input color           InpColorNY            = clrTomato;   // NY session range
 input bool            InpShowSignals        = true;        // Draw sweep / CHoCH / IFVG / trades
 input color           InpColorChoch         = clrAqua;     // CHoCH leg & levels
@@ -158,6 +162,9 @@ void BuildSettings()
    g_s.brokerToRiyadhOffsetHr=InpBrokerToRiyadhHr;
    g_s.asiaStartMin          =ParseHM(InpAsiaStart);
    g_s.asiaEndMin            =ParseHM(InpAsiaEnd);
+   g_s.useLondon             =InpUseLondon;
+   g_s.londonStartMin        =ParseHM(InpLondonStart);
+   g_s.londonEndMin          =ParseHM(InpLondonEnd);
    g_s.nyStartMin            =ParseHM(InpNYStart);
    g_s.nyEndMin              =ParseHM(InpNYEnd);
    g_s.dayCloseHourRiyadh    =InpDayCloseHour;
@@ -204,7 +211,7 @@ int OnInit()
    g_risk.Init(g_s,sym);
    g_dtp.Init(g_s,sym);
    g_journal.Init(g_s.writeJournal,sym);
-   g_visuals.Init(ChartID(),InpShowVisuals,InpColorRange,InpColorAsia,InpColorNY);
+   g_visuals.Init(ChartID(),InpShowVisuals,InpColorRange,InpColorAsia,InpColorLondon,InpColorNY);
    g_visuals.InitSignals(InpShowSignals,InpColorChoch,InpColorIfvg,InpColorSweep);
    g_visuals.InitSwings(InpShowSwings,InpColorSwingHi,InpColorSwingLo);
    g_visuals.SetFvgColor(InpColorFvg);
@@ -359,7 +366,7 @@ void OnPositionOpened(const ulong posTicket,const string model)
    double sl   =PositionGetDouble(POSITION_SL);
    datetime now=TimeCurrent();
    ENUM_SESSION ses=g_session.CurrentSession(now);
-   g_openSession=(ses==SESSION_ASIA)?"ASIA":(ses==SESSION_NY)?"NY":"-";
+   g_openSession=SessionName(ses);
    g_openBias   =isBuy?"BUY":"SELL";
    g_openModel  =model;
    g_openDay    =DayOfWeekName(ToRiyadh(now,g_s)); // same day base as the Mon/Fri filter
@@ -943,7 +950,7 @@ void UpdateAutoBias(const datetime now)
         {
          g_autoBiasWarnKey=sk;
          PrintFormat("[SS] AUTO BIAS: no VWAP data before the %s open - bias stays NONE",
-                     ses==SESSION_ASIA?"ASIA":"NY");
+                     SessionName(ses));
         }
       return;
      }
@@ -959,9 +966,9 @@ void UpdateAutoBias(const datetime now)
 
    string bs=(b==BIAS_BUY)?"BUY":(b==BIAS_SELL)?"SELL":"NONE (open == VWAP)";
    PrintFormat("[SS] AUTO BIAS (VWAP): %s open %.2f vs VWAP %.2f -> %s",
-               ses==SESSION_ASIA?"ASIA":"NY",openPx,vw,bs);
+               SessionName(ses),openPx,vw,bs);
    Alert(StringFormat("SS: AUTO BIAS %s - %s open %.2f vs VWAP %.2f",
-                      bs,ses==SESSION_ASIA?"ASIA":"NY",openPx,vw));
+                      bs,SessionName(ses),openPx,vw));
   }
 
 //+------------------------------------------------------------------+

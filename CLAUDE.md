@@ -37,7 +37,10 @@ reading three things:
 
 1. **Dashboard `Note` line** (top-left panel) — names the *first unmet condition* (`waiting
    liquidity sweep`, `entry window closed`, `session cap reached`, …). This is the primary
-   answer to "why didn't it trade here".
+   answer to "why didn't it trade here". **Two functions write it**: `EvaluateAndAct` sets it on
+   bar close, and `RefreshDashboardLive` rewrites it every tick — but only when it currently
+   matches one of three hard-coded strings (the two "no bias" texts and the Mon/Fri ones). A new
+   note string that should stay live must be added to that list too, or it will freeze.
 2. **`[SS]`-prefixed journal lines** — every order decision is printed in English
    (`LIMIT PLACED`, `POSITION OPENED`, `LIMIT CANCELLED`, `MARKET ... FAILED: retcode`,
    `SKIPPED (invalid SL / lot size = 0)`, `POSITION CLOSED`). In the tester these land in
@@ -87,15 +90,47 @@ Two invariants drive most of the code:
 | File | Owns |
 |------|------|
 | `Common.mqh` | All enums, `SSettings` (every tunable), `SStratState` (dashboard feed), and the Riyadh↔server time helpers (`ToRiyadh` / `FromRiyadh` / `RiyadhMinuteOfDay`). |
-| `SessionManager.mqh` | Riyadh-time session windows, the entry-window gate, `SessionKey()` (the string that resets per-session state), prior-day 4H range computation. |
+| `SessionManager.mqh` | Riyadh-time session windows (Asia / London / NY), the entry-window gate, `SessionKey()` (the string that resets per-session state), prior-day 4H range computation. |
 | `BiasPanel.mqh` | BUY/SELL/NONE buttons. Selection is shown by **colour** and button state is kept un-pressed, so `PollClicks()` can read a fresh press unambiguously. |
 | `Liquidity.mqh` | Swing detection (`IsSwingHigh` / `IsSwingLow`, free functions reused elsewhere), the trailing sweep target, and the latched sweep state + `SweepExtreme()`. |
 | `Vwap.mqh` | Anchored VWAP (Pine port: `hlc3`, daily reset at the Riyadh day-close hour, `tick_volume` fallback). Pure computation — `AnchorStart` / `Series` / `ValueAt`; the auto-bias decision itself lives in the main file. |
 | `EntryModels.mqh` | `CheckCHoCH` / `CheckIFVG` / `CheckEntry`, FVG collection, plus the three window setters that constrain detection (below). |
-| `RiskManager.mqh` | Lot sizing from % risk, %-of-capital ↔ price conversions, and per-session trade caps keyed on `SessionKey`. |
+| `RiskManager.mqh` | Lot sizing from % risk, %-of-capital ↔ price conversions, and per-session trade caps keyed on `SessionKey`. See **Risk sizing** below. |
 | `DynamicTP.mqh` | Post-entry lifecycle: BE at +2%, partial at +4%, structure trail, opposing-CHoCH exit, +10% cap. |
 | `Visuals.mqh` / `Dashboard.mqh` | All chart objects. Names are prefixed and cleared per session. |
 | `TradeJournal.mqh` | Styled Excel XML report at `<AppData>/MetaQuotes/Terminal/Common/Files/SessionsStrategy_Report_<symbol>.xls`. Rebuilt in full after each close; a tester run starts it fresh. |
+
+### Sessions
+
+Three windows, all in Riyadh time: **Asia 03:00–06:00**, **London 09:00–12:00**, **NY 15:00–18:00**.
+London is **not in the charter** — it is an addition gated by `useLondon` (`InpUseLondon`, default
+`true`); when false, `CurrentSession()` never returns `SESSION_LONDON` and the session is invisible
+to the rest of the EA. Asia and NY have no such switch.
+
+Adding or changing a session touches exactly three things: the `ENUM_SESSION` value, the ordered
+checks in `CSessionManager::CurrentSession`, and the `StartMinOf` / `EndMinOf` pair every other
+window query (`InEntryWindow`, `SessionStartServer`, `SessionEndServer`) routes through. Session
+*names* come from one place too — `SessionName()` in `Common.mqh`, which feeds `SessionKey()`, the
+journal's session column, the dashboard, the auto-bias log line and the box label. Never re-inline a
+`(ses==SESSION_ASIA)?"ASIA":"NY"` ternary; a missed one silently mislabels a session as NY.
+
+Overlapping windows are resolved by check order, not rejected — Asia wins over London, London over
+NY. Keep them disjoint.
+
+### Risk sizing (every % in this EA is % of account balance)
+
+`breakEvenAtPercent`, `defaultTargetPercent` and `maxTargetPercent` are **percentages of
+`AccountInfoDouble(ACCOUNT_BALANCE)`**, not R-multiples — which is why the TP price comes from
+`PriceForPercent(maxTargetPercent, lots, …)` and `DynamicTP` gates on `rm.FloatPercent(profit)`.
+
+`CRiskManager` converts money ↔ price through the broker's own `OrderCalcProfit`
+(`LossPerLot`, `ValuePerLotPerPrice`), **never** manual `tickValue / tickSize` math: some brokers
+report `SYMBOL_TRADE_TICK_VALUE` in scaled units, which inflated lots ~100× and turned 0.95% risk
+into ~95% (fixed in `87807eb`). Do not "simplify" it back.
+
+`LotForRisk` rounds **down** to the volume step and returns **0** — refusing the trade — when even
+`SYMBOL_VOLUME_MIN` would over-risk. That is the source of the `SKIPPED … lot size = 0` journal
+line; it is intended behavior, not a bug to paper over.
 
 ### Detection windowing (the subtlest part)
 
@@ -136,6 +171,10 @@ the opening bar cannot move its own reference). Above → BUY, below → SELL, e
   market fallback — and is cancelled only by a newer BOS, a bias change, or the entry window closing.
 - **IFVG** → immediate market entry, and it **supersedes an unfilled CHoCH limit** (charter: "first
   valid trigger after the sweep wins"). On a same-bar tie under `ENTRY_EITHER`, IFVG wins.
+- **LIMIT silently degrades to MARKET.** `PlaceOrder` checks the retrace level against the live
+  ask/bid and, if price is already past it, opens at market instead (printing `price already
+  beyond the retrace level … -> MARKET entry`). The BOS-trailing re-place path relies on this, so
+  a "CHoCH" trade in the journal is not proof a limit was ever working.
 - **SL anchor** defaults to the entry pattern's own leg extreme (`SL_ANCHOR_CHOCH_LEG`), not the
   sweep wick — a session-open spike can sit far from the actual setup. `SL_ANCHOR_SWEEP_WICK`
   restores the session-extreme behavior.
@@ -148,6 +187,10 @@ the opening bar cannot move its own reference). Above → BUY, below → SELL, e
 - **Rule 17** (session direction) is automated by the VWAP rule above by default; `BiasMode =
   MANUAL` restores the charter's letter. This is an approved deviation — do not "fix" it back.
 - **Rules 16 & 18** are reporting conventions, not execution logic.
+
+`CSessionManager::AsiaRangeExited`, `EntryWindowEndServer` and `SessionEndServer` are the leftovers
+of that decision — correct, complete, and deliberately **never called**. Leave them; wiring
+`AsiaRangeExited` back into `EvaluateAndAct` is exactly the re-added rule-2 gate above.
 
 ## Conventions
 

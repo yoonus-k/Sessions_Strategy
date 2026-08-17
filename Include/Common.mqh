@@ -16,9 +16,10 @@ enum ENUM_BIAS
 //--- Which approved session a timestamp belongs to
 enum ENUM_SESSION
   {
-   SESSION_NONE = 0,
-   SESSION_ASIA = 1,
-   SESSION_NY   = 2
+   SESSION_NONE   = 0,
+   SESSION_ASIA   = 1,
+   SESSION_NY     = 2,
+   SESSION_LONDON = 3
   };
 
 //--- Entry confirmation model selection
@@ -82,6 +83,9 @@ struct SSettings
    int               asiaEndMin;
    int               nyStartMin;
    int               nyEndMin;
+   bool              useLondon;               // London session enabled?
+   int               londonStartMin;
+   int               londonEndMin;
    int               dayCloseHourRiyadh;      // anchor for prior-day 4h range
    int               rangeLengthHours;        // Asia range length (4)
    int               entryWindowMinutes;      // entry window from session open
@@ -178,6 +182,20 @@ int RiyadhMinuteOfDay(const datetime riyadhTime)
    MqlDateTime dt;
    TimeToStruct(riyadhTime,dt);
    return(dt.hour*60+dt.min);
+  }
+
+//+------------------------------------------------------------------+
+//| Short English name of a session (logs, dashboard, box labels)    |
+//+------------------------------------------------------------------+
+string SessionName(const ENUM_SESSION ses)
+  {
+   switch(ses)
+     {
+      case SESSION_ASIA:   return("ASIA");
+      case SESSION_LONDON: return("LONDON");
+      case SESSION_NY:     return("NY");
+     }
+   return("-");
   }
 
 //+------------------------------------------------------------------+

@@ -22,6 +22,7 @@ private:
    bool   m_showSig;
    color  m_colRange;
    color  m_colAsia;
+   color  m_colLondon;
    color  m_colNY;
    color  m_colChoch;
    color  m_colIfvg;
@@ -118,10 +119,10 @@ private:
 
 public:
    void Init(const long chart_id,const bool show,
-             const color cRange,const color cAsia,const color cNY)
+             const color cRange,const color cAsia,const color cLondon,const color cNY)
      {
       m_chart=chart_id; m_show=show;
-      m_colRange=cRange; m_colAsia=cAsia; m_colNY=cNY;
+      m_colRange=cRange; m_colAsia=cAsia; m_colLondon=cLondon; m_colNY=cNY;
       // sensible defaults; overridden by InitSignals / InitSwings
       m_showSig=true; m_colChoch=clrAqua; m_colIfvg=clrMagenta; m_colSweep=clrYellow;
       m_showSwings=true; m_colSwingHi=clrTomato; m_colSwingLo=clrLimeGreen;
@@ -294,13 +295,13 @@ public:
       EnsureText(VIS_PREFIX+"RT_"+tag,startSrv,hi,"Prev-Day 4H",m_colRange);
      }
 
-   //--- Developing session range box (Asia/NY)
+   //--- Developing session range box (Asia/London/NY)
    void DrawSessionBox(const ENUM_SESSION ses,const datetime startSrv,
                        const datetime rightSrv,const double hi,const double lo)
      {
       if(!m_show || ses==SESSION_NONE || startSrv<=0) return;
-      string sn =(ses==SESSION_ASIA)?"ASIA":"NY";
-      color  clr=(ses==SESSION_ASIA)?m_colAsia:m_colNY;
+      string sn =SessionName(ses);
+      color  clr=(ses==SESSION_ASIA)?m_colAsia:(ses==SESSION_LONDON)?m_colLondon:m_colNY;
       string tag=sn+"_"+DayTag(startSrv);
       EnsureRect(VIS_PREFIX+"S_"+tag,startSrv,hi,rightSrv,lo,clr,false); // outline only
       EnsureText(VIS_PREFIX+"ST_"+tag,startSrv,hi,sn,clr);
