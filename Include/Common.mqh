@@ -65,6 +65,15 @@ enum ENUM_VWAP_SOURCE
 //--- the main EA and in CDynamicTP; maxOpenPositions is clamped to it.
 #define SS_MAX_OPEN 8
 
+//--- Unit for risk AND for every target threshold. Both move together on
+//--- purpose: sizing in fixed money while targets stay a % of a growing
+//--- balance would let the reward-to-risk ratio drift as the account grows.
+enum ENUM_RISK_MODE
+  {
+   RISK_MODE_PERCENT = 0, // % of account balance
+   RISK_MODE_MONEY   = 1  // Fixed money amount (account currency)
+  };
+
 //--- Which directions may be added on top of an existing break-even position
 enum ENUM_ADD_DIRECTION
   {
@@ -112,16 +121,23 @@ struct SSettings
    ENUM_BIAS_MODE    biasMode;                // manual panel vs VWAP auto-bias
    ENUM_VWAP_ANCHOR  vwapAnchor;              // VWAP reset period
    ENUM_VWAP_SOURCE  vwapSource;              // VWAP price source (hlc3)
-   // Risk
-   double            riskPercent;             // 0.5
+   // Risk. riskMode picks which column of the pairs below is live; read them
+   // through CRiskManager (RiskMoney / BreakEvenMoney / DefaultTargetMoney /
+   // MaxTargetMoney) rather than touching the fields directly.
+   ENUM_RISK_MODE    riskMode;                // % of balance vs fixed money
+   double            riskPercent;             // 0.5   [PERCENT mode]
+   double            riskMoney;               // 500   [MONEY mode]
    ENUM_SL_ANCHOR    slAnchor;                // CHoCH leg extreme vs sweep wick
    double            slBufferPoints;          // pad beyond wick
    double            breakEvenAtPercent;      // 0.25  (~0.5R at riskPercent 0.5)
+   double            breakEvenAtMoney;        // 250   [MONEY mode]
    // Targets
    double            defaultTargetPercent;    // 5.0
+   double            defaultTargetMoney;      // 5000  [MONEY mode]
    double            maxTargetPercent;        // 5.0 - equal to the default target, so the
                                               // partial and the structure trail below the
                                               // cap check in DynamicTP are unreachable
+   double            maxTargetMoney;          // 5000  [MONEY mode]
    bool              usePartialTP;            // false
    double            partialPercent;          // 50
    // Momentum

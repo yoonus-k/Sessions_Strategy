@@ -183,11 +183,31 @@ journal's session column, the dashboard, the auto-bias log line and the box labe
 Overlapping windows are resolved by check order, not rejected — Asia wins over London, London over
 NY. Keep them disjoint.
 
-### Risk sizing (every % in this EA is % of account balance)
+### Risk sizing (everything downstream is MONEY; `riskMode` picks the unit)
 
-`breakEvenAtPercent`, `defaultTargetPercent` and `maxTargetPercent` are **percentages of
-`AccountInfoDouble(ACCOUNT_BALANCE)`**, not R-multiples — which is why the TP price comes from
-`PriceForPercent(maxTargetPercent, lots, …)` and `DynamicTP` gates on `rm.FloatPercent(profit)`.
+`riskMode` (`InpRiskMode`, default `RISK_MODE_PERCENT`) switches **sizing and every target
+threshold together** between % of balance and a fixed money amount. Each setting is a pair —
+`riskPercent`/`riskMoney`, `breakEvenAtPercent`/`breakEvenAtMoney`,
+`defaultTargetPercent`/`defaultTargetMoney`, `maxTargetPercent`/`maxTargetMoney` — and the inactive
+half is ignored.
+
+**Never read those fields directly.** Four `CRiskManager` accessors are the only code that knows
+which unit is live, and everything else (lot sizing, the TP price, all three `DynamicTP` gates)
+works in money:
+
+| Accessor | Replaces |
+|----------|----------|
+| `RiskMoney()` | `CapitalRef()*riskPercent/100` inside `LotForRisk` |
+| `BreakEvenMoney()` | the old `pct >= breakEvenAtPercent` test |
+| `DefaultTargetMoney()` | the old `pct < defaultTargetPercent` test |
+| `MaxTargetMoney()` | the old `pct >= maxTargetPercent` test |
+| `PriceForMoney(money, lots, …)` | the old `PriceForPercent(pct, lots, …)` |
+
+`FloatPercent()` survives for display and journal lines only — it is not a control path.
+
+The two units are deliberately coupled: fixed-money sizing with percent-of-balance targets would
+make the reward-to-risk ratio drift as the balance compounds (10:1 at 100k, 50:1 at 500k). Do not
+"improve" this by letting them be set independently.
 
 `CRiskManager` converts money ↔ price through the broker's own `OrderCalcProfit`
 (`LossPerLot`, `ValuePerLotPerPrice`), **never** manual `tickValue / tickSize` math: some brokers

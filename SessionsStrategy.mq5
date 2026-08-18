@@ -61,14 +61,19 @@ input double          InpPreSweepHours      = 8.0;         // Look this many hou
 input double          InpDetectPreHours     = 2.0;         // CHoCH/IFVG structure sees this many hours before session open (0 = session bars only)
 
 input group "Risk"
-input double          InpRiskPercent        = 0.5;         // Risk per trade (% capital)
+input ENUM_RISK_MODE  InpRiskMode           = RISK_MODE_PERCENT; // Risk & target unit
+input double          InpRiskPercent        = 0.5;         // [%] Risk per trade (% capital)
+input double          InpRiskMoney          = 500.0;       // [$] Risk per trade (money)
 input ENUM_SL_ANCHOR  InpSLAnchor           = SL_ANCHOR_CHOCH_LEG; // SL anchor (CHoCH leg extreme / sweep wick)
 input double          InpSLBufferPoints     = 0;           // SL pad beyond wick (points)
-input double          InpBreakEvenAtPercent = 0.25;        // Move SL to BE at (%)
+input double          InpBreakEvenAtPercent = 0.25;        // [%] Move SL to BE at (%)
+input double          InpBreakEvenAtMoney   = 250.0;       // [$] Move SL to BE at (money)
 
 input group "Targets"
-input double          InpDefaultTargetPct   = 5.0;         // Default target (%)
-input double          InpMaxTargetPct       = 5.0;         // Hard cap (%)
+input double          InpDefaultTargetPct   = 5.0;         // [%] Default target (%)
+input double          InpDefaultTargetMoney = 5000.0;      // [$] Default target (money)
+input double          InpMaxTargetPct       = 5.0;         // [%] Hard cap (%)
+input double          InpMaxTargetMoney     = 5000.0;      // [$] Hard cap (money)
 input bool            InpUsePartialTP       = false;       // Partial close at default target
 input double          InpPartialPercent     = 50.0;        // Partial size (%)
 
@@ -198,12 +203,17 @@ void BuildSettings()
    g_s.biasMode              =InpBiasMode;
    g_s.vwapAnchor            =InpVwapAnchor;
    g_s.vwapSource            =InpVwapSource;
+   g_s.riskMode              =InpRiskMode;
    g_s.riskPercent           =InpRiskPercent;
+   g_s.riskMoney             =InpRiskMoney;
    g_s.slAnchor              =InpSLAnchor;
    g_s.slBufferPoints        =InpSLBufferPoints;
    g_s.breakEvenAtPercent    =InpBreakEvenAtPercent;
+   g_s.breakEvenAtMoney      =InpBreakEvenAtMoney;
    g_s.defaultTargetPercent  =InpDefaultTargetPct;
+   g_s.defaultTargetMoney    =InpDefaultTargetMoney;
    g_s.maxTargetPercent      =InpMaxTargetPct;
+   g_s.maxTargetMoney        =InpMaxTargetMoney;
    g_s.usePartialTP          =InpUsePartialTP;
    g_s.partialPercent        =InpPartialPercent;
    g_s.momentumBodyATR       =InpMomentumBodyATR;
@@ -252,6 +262,19 @@ int OnInit()
    else if(InpBiasMode==BIAS_MODE_VWAP)
       PrintFormat("[SS] BIAS MODE: AUTO via VWAP (%s anchor) - the panel is an override only",
                   InpVwapAnchor==VWAP_ANCHOR_WEEK?"week":"day");
+
+   // which risk unit is live decides how EVERY threshold is read — print the
+   // resolved numbers so a saved .set can never be ambiguous
+   if(g_s.riskMode==RISK_MODE_MONEY)
+      PrintFormat("[SS] RISK MODE: FIXED MONEY - risk %.2f, BE at %.2f, default target %.2f, cap %.2f (%s). The %% inputs are IGNORED.",
+                  g_s.riskMoney,g_s.breakEvenAtMoney,g_s.defaultTargetMoney,g_s.maxTargetMoney,
+                  AccountInfoString(ACCOUNT_CURRENCY));
+   else
+      PrintFormat("[SS] RISK MODE: PERCENT OF BALANCE - risk %.2f%%, BE at %.2f%%, default target %.2f%%, cap %.2f%% (= %.2f / %.2f / %.2f / %.2f %s at the current balance). The $ inputs are IGNORED.",
+                  g_s.riskPercent,g_s.breakEvenAtPercent,g_s.defaultTargetPercent,g_s.maxTargetPercent,
+                  g_risk.RiskMoney(),g_risk.BreakEvenMoney(),
+                  g_risk.DefaultTargetMoney(),g_risk.MaxTargetMoney(),
+                  AccountInfoString(ACCOUNT_CURRENCY));
 
    // multi-position mode breaks the charter's one-trade-at-a-time rule, and a
    // saved .set can enable it silently — say so on every init
@@ -679,7 +702,7 @@ bool OpenMarket(const bool isBuy,double sl,const string model)
                   model,isBuy?"BUY":"SELL",MathAbs(entry-sl));
       return(false);
      }
-   double tp=g_risk.PriceForPercent(g_s.maxTargetPercent,lots,isBuy,entry);
+   double tp=g_risk.PriceForMoney(g_risk.MaxTargetMoney(),lots,isBuy,entry);
 
    bool ok=isBuy ? g_trade.Buy (lots,_Symbol,entry,sl,tp,"SS "+model)
                  : g_trade.Sell(lots,_Symbol,entry,sl,tp,"SS "+model);
@@ -759,7 +782,7 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
                   sig.model,isBuy?"BUY":"SELL",MathAbs(entry-sl));
       return;
      }
-   double tp=g_risk.PriceForPercent(g_s.maxTargetPercent,lots,isBuy,entry);
+   double tp=g_risk.PriceForMoney(g_risk.MaxTargetMoney(),lots,isBuy,entry);
 
    bool ok=isBuy
            ? g_trade.BuyLimit (lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model)

@@ -44,6 +44,33 @@ public:
 
    double CapitalRef() const { return(AccountInfoDouble(ACCOUNT_BALANCE)); }
 
+   //+----------------------------------------------------------------+
+   //| Mode-aware money accessors. Everything downstream — lot sizing, |
+   //| the TP price, and every DynamicTP threshold — works in MONEY,   |
+   //| so PERCENT and MONEY mode share one code path and only these    |
+   //| four functions know which unit the user configured.             |
+   //+----------------------------------------------------------------+
+   double RiskMoney() const
+     {
+      return(m_s.riskMode==RISK_MODE_MONEY ? m_s.riskMoney
+                                           : CapitalRef()*m_s.riskPercent/100.0);
+     }
+   double BreakEvenMoney() const
+     {
+      return(m_s.riskMode==RISK_MODE_MONEY ? m_s.breakEvenAtMoney
+                                           : CapitalRef()*m_s.breakEvenAtPercent/100.0);
+     }
+   double DefaultTargetMoney() const
+     {
+      return(m_s.riskMode==RISK_MODE_MONEY ? m_s.defaultTargetMoney
+                                           : CapitalRef()*m_s.defaultTargetPercent/100.0);
+     }
+   double MaxTargetMoney() const
+     {
+      return(m_s.riskMode==RISK_MODE_MONEY ? m_s.maxTargetMoney
+                                           : CapitalRef()*m_s.maxTargetPercent/100.0);
+     }
+
    //--- Money lost on exactly 1.0 lot if price runs from entry to the stop.
    //    Uses the broker's own OrderCalcProfit so the result is correct on any
    //    broker/symbol - NOT the manual tickValue/tickSize math, which some
@@ -60,14 +87,15 @@ public:
       return(MathAbs(profit)); // money risked per 1.0 lot over this SL distance
      }
 
-   //--- Lot size for a fixed riskPercent% capital risk over the SL distance
+   //--- Lot size for one trade's risk budget over the SL distance
    double LotForRisk(const double entry,const double sl) const
      {
       if(MathAbs(entry-sl)<=0) return(0);
       double lossPerLot=LossPerLot(entry,sl);
       if(lossPerLot<=0) return(0);
 
-      double riskMoney=CapitalRef()*m_s.riskPercent/100.0; // 0.95 -> 0.95%
+      double riskMoney=RiskMoney();   // 0.5% of balance, or a fixed amount
+      if(riskMoney<=0) return(0);
       double lots=riskMoney/lossPerLot;
 
       double step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
@@ -86,13 +114,13 @@ public:
       return(lots);
      }
 
-   //--- Price level that yields 'pct' % of capital for a given lot size
-   double PriceForPercent(const double pct,const double lots,
-                          const bool isBuy,const double entry) const
+   //--- Price level that yields 'money' of profit for a given lot size.
+   //    Returns 0 (= "no TP") when the inputs cannot produce a valid level.
+   double PriceForMoney(const double money,const double lots,
+                        const bool isBuy,const double entry) const
      {
       double vpp=ValuePerLotPerPrice();
-      if(vpp<=0 || lots<=0) return(0);
-      double money=CapitalRef()*pct/100.0;
+      if(vpp<=0 || lots<=0 || money<=0) return(0);
       double move=money/(lots*vpp);
       return(isBuy ? entry+move : entry-move);
      }

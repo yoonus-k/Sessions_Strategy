@@ -105,10 +105,11 @@ private:
       double profit=PositionGetDouble(POSITION_PROFIT);
       double sl    =PositionGetDouble(POSITION_SL);
       double tp    =PositionGetDouble(POSITION_TP);
-      double pct   =rm.FloatPercent(profit);
 
-      // 1) Break-even at +2% (rule 7)
-      if(!t.beDone && pct>=m_s.breakEvenAtPercent)
+      // All three thresholds come from CRiskManager in MONEY, so this logic is
+      // identical whether the user configured % of balance or a fixed amount.
+      // 1) Break-even (rule 7)
+      if(!t.beDone && profit>=rm.BreakEvenMoney())
         {
          double be=t.entry;
          if((t.isBuy && (sl<be||sl==0)) || (!t.isBuy && (sl>be||sl==0)))
@@ -116,11 +117,11 @@ private:
          t.beDone=true;
         }
 
-      // Nothing else acts before the +4% default target (rule 14)
-      if(pct<m_s.defaultTargetPercent) return;
+      // Nothing else acts before the default target (rule 14)
+      if(profit<rm.DefaultTargetMoney()) return;
 
-      // 2) Hard cap at +10% (rule 11)
-      if(pct>=m_s.maxTargetPercent){ trade.PositionClose(t.ticket); t.active=false; return; }
+      // 2) Hard cap (rule 11)
+      if(profit>=rm.MaxTargetMoney()){ trade.PositionClose(t.ticket); t.active=false; return; }
 
       // 3) Optional partial at the default target
       if(m_s.usePartialTP && !t.partialDone)

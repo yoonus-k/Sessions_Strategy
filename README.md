@@ -219,6 +219,35 @@ alert, and is drawn on the chart as a blue level at the compared VWAP with the v
 - **Break-even**: +2% floating gain → SL to entry (rule 7).
 - **Session cap**: stop after 1 winner; else up to 2 trades; TP hit → session locked. Next session starts fresh (same or next day).
 
+
+### 5.1 Risk unit — % of balance or fixed money
+
+`RiskMode` selects the unit for **position sizing and every target threshold at once**:
+
+| Mode | Live inputs | Ignored |
+|------|-------------|---------|
+| `% of account balance` (default) | `RiskPercent`, `BreakEvenAtPercent`, `DefaultTargetPercent`, `MaxTargetPercent` | the four `*Money` inputs |
+| `Fixed money amount` | `RiskMoney`, `BreakEvenAtMoney`, `DefaultTargetMoney`, `MaxTargetMoney` | the four `*Percent` inputs |
+
+The defaults are equivalent at a 100,000 starting balance — 0.5% / 0.25% / 5% / 5% is 500 / 250 /
+5,000 / 5,000 — so switching modes on a fresh account changes nothing until the balance moves.
+
+**Both halves switch together on purpose.** Sizing in fixed money while the targets stayed a
+percentage of a growing balance would let the reward-to-risk ratio drift: risking a flat 500 with a
+5%-of-balance target is 10:1 at 100,000 and 50:1 at 500,000, silently turning into a different
+strategy as the account compounds. Splitting the two units is a footgun, so the mode covers both.
+
+**Fixed money does not compound.** `% of balance` grows position size with the account (which is
+what produced the 100,000 → 509,514 curve in the validated backtest, and also why raw
+`Total Net Profit` is never comparable between runs). `Fixed money` holds size flat, so equity grows
+linearly and drawdowns stay constant in cash — usually the better choice for evaluating whether an
+edge is real, and for prop-firm accounts with a fixed daily-loss limit.
+
+Internally there is only one code path: `CRiskManager` exposes `RiskMoney()`, `BreakEvenMoney()`,
+`DefaultTargetMoney()` and `MaxTargetMoney()`, everything downstream works in money, and those four
+functions are the only place that knows which unit is configured. `OnInit` prints the resolved
+numbers in both modes.
+
 ---
 
 ## 6. Dynamic Take-Profit Engine ⭐
@@ -342,12 +371,17 @@ cycle. Trade caps are unchanged — every add still consumes one of `MaxTradesPe
 | Entry | `ChochRetrace` | 0.25 | Limit at 25% retrace of breaking leg |
 | Entry | `PreSweepHours` | 8.0 | Hours left of session open to find the low/high to sweep |
 | Entry | `DetectPreHours` | 2.0 | CHoCH/IFVG structure sees this many hours before the open (0 = session only) |
-| Risk | `RiskPercent` | 0.5 | Rule 9 (charter says 0.95; 0.5 is the validated default) |
+| Risk | `RiskMode` | % of balance | Unit for risk **and** every target — see **Risk unit** |
+| Risk | `RiskPercent` | 0.5 | Rule 9 (charter says 0.95; 0.5 is the validated default) — `%` mode |
+| Risk | `RiskMoney` | 500 | Fixed risk per trade in account currency — `$` mode |
 | Risk | `SLAnchor` | CHoCH leg | SL at breaking-leg extreme (CHoCH) or sweep wick |
 | Risk | `SLBufferPoints` | 0 | Pad beyond anchor |
-| Risk | `BreakEvenAtPercent` | 0.25 | Rule 7 — ≈0.5R at `RiskPercent = 0.5`. Hair-trigger; see **Tick model** |
-| TP | `DefaultTargetPercent` | 5.0 | Rule 12 default |
-| TP | `MaxTargetPercent` | 5.0 | Rule 11 cap — **equal to the default target, which disables the partial and the trail** |
+| Risk | `BreakEvenAtPercent` | 0.25 | Rule 7 — ≈0.5R at `RiskPercent = 0.5`. Hair-trigger; see **Tick model** — `%` mode |
+| Risk | `BreakEvenAtMoney` | 250 | Same trigger in money — `$` mode |
+| TP | `DefaultTargetPercent` | 5.0 | Rule 12 default — `%` mode |
+| TP | `DefaultTargetMoney` | 5000 | Rule 12 default — `$` mode |
+| TP | `MaxTargetPercent` | 5.0 | Rule 11 cap — **equal to the default target, which disables the partial and the trail** — `%` mode |
+| TP | `MaxTargetMoney` | 5000 | Rule 11 cap — `$` mode |
 | TP | `UsePartialTP` | false | Section 6.6 |
 | TP | `PartialPercent` | 50 | Closed at +4% |
 | TP | `MomentumBodyATR` | 1.3 | Displacement |
