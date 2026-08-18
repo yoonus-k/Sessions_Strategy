@@ -73,19 +73,45 @@ poll bias buttons (PollClicks)          ← the tester never calls OnChartEvent;
 session-key change → wipe drawings, reset sweep
 ComputeRangeIfNeeded
 newBar = IsNewBar()                     ← evaluated ONCE, reused below
-if position open  → g_dtp.Manage()      (BE, runner, trail — every tick, or newBar
-                                         only when manageOnBarClose is set)
-CheckClosedPosition / ManagePending     (fill + cancel detection)
+if any position open → g_dtp.Manage()   (BE, runner, trail for EVERY open position;
+                                         every tick, or newBar only when
+                                         manageOnBarClose is set)
+CheckClosedPosition / ManagePending     (fill + cancel detection, per slot)
 if newBar:
-   if position OR pending open → TrailPendingOnNewBos() only; NO fresh detection
-   else                        → EvaluateAndAct() + visuals
+   if pending open              → TrailPendingOnNewBos() only; NO fresh detection
+   elif open && !CanOpenAnother → NO fresh detection ("managing position")
+   else                         → EvaluateAndAct() + visuals
 RefreshDashboardLive()                  (every tick, so the panel stays live while paused)
 ```
 
 Two invariants drive most of the code:
-- **One position at a time.** While a trade or a pending CHoCH limit is live, detection and setup
-  drawing stop completely.
+- **One position at a time — unless it is risk-free.** While a pending CHoCH limit is live, or a
+  position still carries real risk, detection and setup drawing stop completely. `addWhenBreakEven`
+  (default `false`) is the only thing that relaxes this; see below.
 - **Signals confirm on bar close**, but management (BE, runner, trail, dashboard) runs every tick.
+
+### Multi-position mode
+
+Open positions live in `SOpenPos g_open[SS_MAX_OPEN]` (main file) with a matching
+`STpTrade m_t[SS_MAX_OPEN]` inside `CDynamicTP` — each position carries its **own** entry, BE flag,
+partial flag and trail. There is no "the open position" any more; use the helpers:
+
+| Helper | Answers |
+|--------|---------|
+| `OpenCount()` | how many slots are active |
+| `IsTracked(ticket)` | is this ticket already in a slot (guards the pending-fill fallback) |
+| `AllOpenAtBreakEven()` | is every open position's **live** `POSITION_SL` at entry or better |
+| `CanOpenAnother()` | the count gate: always true at 0; otherwise needs `addWhenBreakEven`, room under `maxOpenPositions`, and `AllOpenAtBreakEven()` |
+| `AddDirectionAllowed(bias)` | the direction gate, evaluated against **every** open position |
+
+`AllOpenAtBreakEven` deliberately reads the broker's SL rather than `CDynamicTP`'s `beDone` flag:
+`ManageOne` sets `beDone = true` even when the `PositionModify` was rejected (stops level), so the
+flag can claim protection that does not exist. Never "simplify" it to the flag.
+
+Three places assume the slot model and will silently misbehave if you revert one of them: the
+`CheckClosedPosition` loop (journals and frees each slot), `OnPositionOpened` (claims a free slot,
+warns and bails when full), and the `IsTracked` skip in `ManagePending`'s fallback — without it a
+limit fill adopts an older position and double-books it.
 
 ### Tick-model sensitivity (why two tester runs disagree)
 

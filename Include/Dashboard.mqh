@@ -99,7 +99,9 @@ public:
             +"  Wins: "+(string)s.wins+"  Day: "+(s.dayAllowed?"OK":"OFF"),
             (s.canOpen && s.dayAllowed)?cInfo:cBad);
 
-      string pos=s.positionOpen?StringFormat("OPEN  %.2f%%",s.floatPct):"none";
+      string pos=s.positionOpen
+                 ?StringFormat("OPEN x%d  %.2f%%%s",s.openCount,s.floatPct,s.allAtBE?"  [BE]":"")
+                 :"none";
       Label(8,"Position    : "+pos+(s.pending?"   [LIMIT pending]":""),
             s.positionOpen?cGood:cInfo);
 

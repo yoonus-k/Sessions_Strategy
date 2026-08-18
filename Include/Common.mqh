@@ -61,6 +61,18 @@ enum ENUM_VWAP_SOURCE
    VWAP_SRC_OHLC4 = 3  // (O+H+L+C)/4
   };
 
+//--- Hard ceiling on concurrently tracked positions. Sizes the slot arrays in
+//--- the main EA and in CDynamicTP; maxOpenPositions is clamped to it.
+#define SS_MAX_OPEN 8
+
+//--- Which directions may be added on top of an existing break-even position
+enum ENUM_ADD_DIRECTION
+  {
+   ADD_DIR_BOTH    = 0, // Same or counter direction
+   ADD_DIR_COUNTER = 1, // Counter-direction only (hedge the BE position)
+   ADD_DIR_SAME    = 2  // Same-direction only (scale in)
+  };
+
 //--- Per-trade outcome bookkeeping for session caps
 enum ENUM_TRADE_RESULT
   {
@@ -119,6 +131,10 @@ struct SSettings
    double            trailPadPoints;
    // Management cadence
    bool              manageOnBarClose;        // run DynamicTP on new bar only (default true)
+   // Adding on top of a risk-free position
+   bool              addWhenBreakEven;        // allow a 2nd+ position once every open one is at BE
+   ENUM_ADD_DIRECTION addDirection;           // which directions may be added
+   int               maxOpenPositions;        // ceiling on concurrent positions (1..SS_MAX_OPEN)
    // Caps
    int               maxTradesPerSession;     // 3
    bool              stopAfterFirstWin;       // true
@@ -157,7 +173,9 @@ struct SStratState
    int          maxTrades;
    bool         dayAllowed;
    bool         positionOpen;
-   double       floatPct;
+   int          openCount;    // concurrently open positions
+   bool         allAtBE;      // every open position has its SL at break-even or better
+   double       floatPct;     // summed floating P/L of all open positions
    bool         pending;
    string       note;
   };

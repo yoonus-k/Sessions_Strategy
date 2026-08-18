@@ -277,6 +277,44 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 > partial or the structure trail at all, set `MaxTargetPercent` strictly greater than
 > `DefaultTargetPercent`.
 
+
+### 6.7 Adding on a risk-free trade
+
+By default the EA holds **one position at a time**: while a trade is live, detection stops
+completely. `AddWhenBE = true` relaxes that — but only once the existing exposure costs nothing.
+
+A new position may open when **all** of these hold:
+
+1. `AddWhenBE` is on;
+2. **every** open position has its stop at break-even or better — read from the live
+   `POSITION_SL` against `POSITION_PRICE_OPEN`, not from an internal flag, so a
+   `PositionModify` the broker rejected still counts as *unprotected*;
+3. the open count is below `MaxOpenPositions`;
+4. no CHoCH limit is working (a pending order still owns the bar, and trails on new BOS);
+5. the direction passes `AddDirection`;
+6. all the normal gates — bias armed, in session, inside the entry window, session cap, weekday.
+
+`AddDirection` is evaluated against **every** open position, not just the newest:
+
+| Setting | Meaning |
+|---------|---------|
+| `Both` | No direction constraint. |
+| `Counter only` | The new trade must be **opposite** to every open position. A long at BE + a SELL bias next session → allowed. |
+| `Same only` | The new trade must **match** every open position (scaling in). |
+
+Because the test is over all open positions, holding one long and one short admits no third trade
+under either restricted mode — which is the intended safety property, not a limitation.
+
+Each position keeps its **own** lifecycle state: its own break-even flag, partial flag, entry price
+and trail. `CDynamicTP` tracks up to `SS_MAX_OPEN` (8) of them and manages each independently every
+cycle. Trade caps are unchanged — every add still consumes one of `MaxTradesPerSession`, and
+`StopAfterFirstWin` still locks the session on the first winner.
+
+> **This is a deliberate departure from charter rule 10.** With `AddWhenBE = false` (the default)
+> the EA behaves exactly as before. Turn it on only if you accept holding correlated or hedged gold
+> exposure across sessions; note that the second position carries **full** risk while the first
+> carries none, so account risk is *not* doubled — but it is not zero either.
+
 ---
 
 ## 7. Proposed inputs (parameters)
@@ -317,6 +355,9 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | TP | `AtrContractionFactor` | 0.6 | Exhaustion |
 | TP | `TrailPadPoints` | broker-tuned | Structure-trail pad |
 | Cadence | `ManageOnBarClose` | true | Run the management stack on bar close only — see **Tick model** |
+| Adds | `AddWhenBE` | false | Allow a new position once every open one is at break-even — see **Adding on a risk-free trade** |
+| Adds | `AddDirection` | Both | Which direction may be added: both / counter-only / same-only |
+| Adds | `MaxOpenPositions` | 2 | Ceiling on concurrent positions (1–8) |
 | Caps | `MaxTradesPerSession` | 3 | Rule 10 (charter says 2) |
 | Caps | `StopAfterFirstWin` | true | Rule 10 |
 | Logging | `WriteTradeJournalCSV` | true | Rule 16 helper |

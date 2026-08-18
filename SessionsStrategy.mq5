@@ -81,6 +81,11 @@ input double          InpTrailPadPoints     = 0;           // Structure-trail pa
 input group "Management cadence"
 input bool            InpManageOnBarClose   = true;        // Manage position on bar close only (tick-model independent)
 
+input group "Add positions on a risk-free trade"
+input bool            InpAddWhenBE          = false;       // Allow a new position once every open one is at break-even
+input ENUM_ADD_DIRECTION InpAddDirection    = ADD_DIR_BOTH;// Which direction may be added
+input int             InpMaxOpenPositions   = 2;           // Max concurrent positions (1-8)
+
 input group "Session caps"
 input int             InpMaxTradesPerSession= 3;           // Max trades per session
 input bool            InpStopAfterFirstWin  = true;        // Stop after first win
@@ -126,18 +131,29 @@ CTrade           g_trade;
 
 SStratState      g_state;
 datetime         g_lastBar=0;
-ulong            g_openTicket=0;      // position ticket
-long             g_openPositionId=0;  // position identifier (for history)
+
+//--- One tracked position. Normally there is exactly one; with
+//--- addWhenBreakEven the EA may hold up to maxOpenPositions at once.
+struct SOpenPos
+  {
+   bool     active;
+   ulong    ticket;
+   long     positionId;   // for HistorySelectByPosition
+   bool     isBuy;
+   double   entry;
+   double   lots;
+   string   session;      // journal fields, captured at open time
+   string   bias;
+   string   model;
+   string   day;
+  };
+SOpenPos         g_open[SS_MAX_OPEN];
+
 ulong            g_pendingTicket=0;   // working CHoCH limit order
 string           g_pendingModel="";
 SEntrySignal     g_lastBos;           // newest confirmed BOS (the "liquidity")
 datetime         g_pendingBasisTime=0;// structTime of the BOS the limit sits on
 int              g_bosCount=0;        // BOS counter for the current pending cycle
-string           g_openSession="";
-string           g_openBias="";
-string           g_openModel="";      // entry model of the open trade (report)
-string           g_openDay="";        // Riyadh week-day the trade opened on
-double           g_openLots=0;
 string           g_lastSessionKey="";
 //--- VWAP auto-bias state
 string           g_autoBiasKey="";    // session key the auto bias was decided for
@@ -195,6 +211,9 @@ void BuildSettings()
    g_s.atrContractionFactor  =InpAtrContractionFac;
    g_s.trailPadPoints        =InpTrailPadPoints;
    g_s.manageOnBarClose      =InpManageOnBarClose;
+   g_s.addWhenBreakEven      =InpAddWhenBE;
+   g_s.addDirection          =InpAddDirection;
+   g_s.maxOpenPositions      =(int)MathMax(1,MathMin(SS_MAX_OPEN,InpMaxOpenPositions));
    g_s.maxTradesPerSession   =InpMaxTradesPerSession;
    g_s.stopAfterFirstWin     =InpStopAfterFirstWin;
    g_s.tradeMonday           =InpTradeMonday;
@@ -234,6 +253,14 @@ int OnInit()
       PrintFormat("[SS] BIAS MODE: AUTO via VWAP (%s anchor) - the panel is an override only",
                   InpVwapAnchor==VWAP_ANCHOR_WEEK?"week":"day");
 
+   // multi-position mode breaks the charter's one-trade-at-a-time rule, and a
+   // saved .set can enable it silently — say so on every init
+   if(g_s.addWhenBreakEven)
+      PrintFormat("[SS] ADD-ON-BREAK-EVEN: ON (%s, max %d concurrent) - a new position may open while existing ones sit at BE",
+                  g_s.addDirection==ADD_DIR_COUNTER?"counter-direction only":
+                  g_s.addDirection==ADD_DIR_SAME   ?"same-direction only":"same or counter",
+                  g_s.maxOpenPositions);
+
    g_trade.SetExpertMagicNumber(g_s.magic);
    g_trade.SetTypeFillingBySymbol(sym);
    g_trade.SetDeviationInPoints(20);
@@ -272,10 +299,11 @@ void RefreshDashboardLive()
    g_state.sessionOpen =g_sessionOpenPx;
    g_state.session     =g_session.CurrentSession(now);
    g_state.inWindow    =g_session.InEntryWindow(now);
-   g_state.positionOpen=(g_openTicket!=0);
+   g_state.openCount   =OpenCount();
+   g_state.positionOpen=(g_state.openCount>0);
+   g_state.allAtBE     =g_state.positionOpen && AllOpenAtBreakEven();
    g_state.pending     =(g_pendingTicket!=0);
-   if(g_state.positionOpen && PositionSelectByTicket(g_openTicket))
-      g_state.floatPct=g_risk.FloatPercent(PositionGetDouble(POSITION_PROFIT));
+   g_state.floatPct    =g_state.positionOpen?OpenFloatPercent():0;
    // keep day / max-trades live every tick
    MqlDateTime _drl; TimeToStruct(ToRiyadh(now,g_s),_drl);
    g_state.dayAllowed=!(_drl.day_of_week==1 && !g_s.tradeMonday) &&
@@ -308,6 +336,85 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
   }
 
 //+------------------------------------------------------------------+
+//| Open-position slots                                              |
+//+------------------------------------------------------------------+
+int OpenCount()
+  {
+   int n=0;
+   for(int i=0;i<SS_MAX_OPEN;i++) if(g_open[i].active) n++;
+   return(n);
+  }
+
+bool IsTracked(const ulong ticket)
+  {
+   for(int i=0;i<SS_MAX_OPEN;i++)
+      if(g_open[i].active && g_open[i].ticket==ticket) return(true);
+   return(false);
+  }
+
+//--- Is EVERY open position protected at break-even or better? A position
+//--- whose SL still sits at the original stop is real risk, so adding on top
+//--- of it is refused. Read from the live SL rather than DynamicTP's beDone
+//--- flag: if the broker rejected the PositionModify (stops level), beDone is
+//--- still set but the stop never actually moved.
+bool AllOpenAtBreakEven()
+  {
+   double tol=SymbolInfoDouble(_Symbol,SYMBOL_POINT)*0.5;
+   bool any=false;
+   for(int i=0;i<SS_MAX_OPEN;i++)
+     {
+      if(!g_open[i].active) continue;
+      if(!PositionSelectByTicket(g_open[i].ticket)) continue; // gone; reaped below
+      any=true;
+      double sl=PositionGetDouble(POSITION_SL);
+      if(sl==0) return(false);                                // no stop at all
+      double entry=PositionGetDouble(POSITION_PRICE_OPEN);
+      bool   isBuy=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY);
+      if(isBuy  && sl<entry-tol) return(false);
+      if(!isBuy && sl>entry+tol) return(false);
+     }
+   return(any);
+  }
+
+//--- Gate on the NUMBER of positions: the charter default is one at a time.
+bool CanOpenAnother()
+  {
+   int n=OpenCount();
+   if(n==0)                        return(true);
+   if(!g_s.addWhenBreakEven)       return(false);  // classic one-position rule
+   if(n>=g_s.maxOpenPositions)     return(false);
+   return(AllOpenAtBreakEven());
+  }
+
+//--- Gate on the DIRECTION of the addition. Evaluated against every open
+//--- position, so COUNTER means "opposite to all of them" and SAME means
+//--- "matching all of them" — with one long and one short already open,
+//--- neither mode admits a third.
+bool AddDirectionAllowed(const ENUM_BIAS bias)
+  {
+   if(OpenCount()==0)                  return(true);
+   if(g_s.addDirection==ADD_DIR_BOTH)  return(true);
+   bool wantBuy=(bias==BIAS_BUY);
+   for(int i=0;i<SS_MAX_OPEN;i++)
+     {
+      if(!g_open[i].active) continue;
+      if(g_s.addDirection==ADD_DIR_COUNTER && g_open[i].isBuy==wantBuy) return(false);
+      if(g_s.addDirection==ADD_DIR_SAME    && g_open[i].isBuy!=wantBuy) return(false);
+     }
+   return(true);
+  }
+
+//--- Summed floating P/L of everything open, as % of capital
+double OpenFloatPercent()
+  {
+   double sum=0;
+   for(int i=0;i<SS_MAX_OPEN;i++)
+      if(g_open[i].active && PositionSelectByTicket(g_open[i].ticket))
+         sum+=PositionGetDouble(POSITION_PROFIT);
+   return(g_risk.FloatPercent(sum));
+  }
+
+//+------------------------------------------------------------------+
 bool IsNewBar()
   {
    datetime t=iTime(_Symbol,g_s.tf,0);
@@ -320,36 +427,41 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 void CheckClosedPosition()
   {
-   if(g_openTicket==0) return;
-   if(PositionSelectByTicket(g_openTicket)) return; // still open
-
-   // gather realized P/L from history
-   double total=0; datetime closeTime=TimeCurrent(); double exit=0;
-   if(HistorySelectByPosition(g_openPositionId))
+   for(int i=0;i<SS_MAX_OPEN;i++)
      {
-      int deals=HistoryDealsTotal();
-      for(int i=0;i<deals;i++)
+      if(!g_open[i].active) continue;
+      if(PositionSelectByTicket(g_open[i].ticket)) continue; // still open
+
+      // gather realized P/L from history
+      double total=0; datetime closeTime=TimeCurrent(); double exit=0;
+      if(HistorySelectByPosition(g_open[i].positionId))
         {
-         ulong d=HistoryDealGetTicket(i);
-         total+=HistoryDealGetDouble(d,DEAL_PROFIT)
-               +HistoryDealGetDouble(d,DEAL_SWAP)
-               +HistoryDealGetDouble(d,DEAL_COMMISSION);
-         if(HistoryDealGetInteger(d,DEAL_ENTRY)==DEAL_ENTRY_OUT)
+         int deals=HistoryDealsTotal();
+         for(int k=0;k<deals;k++)
            {
-            closeTime=(datetime)HistoryDealGetInteger(d,DEAL_TIME);
-            exit     =HistoryDealGetDouble(d,DEAL_PRICE);
+            ulong d=HistoryDealGetTicket(k);
+            total+=HistoryDealGetDouble(d,DEAL_PROFIT)
+                  +HistoryDealGetDouble(d,DEAL_SWAP)
+                  +HistoryDealGetDouble(d,DEAL_COMMISSION);
+            if(HistoryDealGetInteger(d,DEAL_ENTRY)==DEAL_ENTRY_OUT)
+              {
+               closeTime=(datetime)HistoryDealGetInteger(d,DEAL_TIME);
+               exit     =HistoryDealGetDouble(d,DEAL_PRICE);
+              }
            }
         }
-     }
-   bool win=(total>0);
-   g_risk.RegisterClose(win);
-   g_journal.LogTrade(g_openDay,closeTime,g_openSession,g_openBias,g_openModel,
-                      g_openLots,total,AccountInfoDouble(ACCOUNT_BALANCE));
-   PrintFormat("[SS] POSITION CLOSED: %I64u exit %.2f, P/L %.2f (%.2f%%) -> %s",
-               g_openTicket,exit,total,g_risk.FloatPercent(total),win?"WIN":"LOSS");
+      bool win=(total>0);
+      g_risk.RegisterClose(win);
+      g_journal.LogTrade(g_open[i].day,closeTime,g_open[i].session,g_open[i].bias,
+                         g_open[i].model,g_open[i].lots,total,
+                         AccountInfoDouble(ACCOUNT_BALANCE));
+      PrintFormat("[SS] POSITION CLOSED: %I64u exit %.2f, P/L %.2f (%.2f%%) -> %s (%d still open)",
+                  g_open[i].ticket,exit,total,g_risk.FloatPercent(total),
+                  win?"WIN":"LOSS",OpenCount()-1);
 
-   g_openTicket=0; g_openPositionId=0;
-   g_dtp.Clear();
+      g_dtp.Clear(g_open[i].ticket);
+      g_open[i].active=false;
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -362,31 +474,46 @@ void OnPositionOpened(const ulong posTicket,const string model)
       PrintFormat("[SS] WARNING: position %I64u not found after open - tracking failed",posTicket);
       return;
      }
-   g_openTicket    =posTicket;
-   g_openPositionId=(long)PositionGetInteger(POSITION_IDENTIFIER);
+   int slot=-1;
+   for(int i=0;i<SS_MAX_OPEN;i++) if(!g_open[i].active){ slot=i; break; }
+   if(slot<0)
+     {
+      PrintFormat("[SS] WARNING: no free slot for position %I64u - it will be UNTRACKED",posTicket);
+      return;
+     }
+
    bool   isBuy=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY);
    double entry=PositionGetDouble(POSITION_PRICE_OPEN);
    double lots =PositionGetDouble(POSITION_VOLUME);
    double sl   =PositionGetDouble(POSITION_SL);
    datetime now=TimeCurrent();
    ENUM_SESSION ses=g_session.CurrentSession(now);
-   g_openSession=SessionName(ses);
-   g_openBias   =isBuy?"BUY":"SELL";
-   g_openModel  =model;
-   g_openDay    =DayOfWeekName(ToRiyadh(now,g_s)); // same day base as the Mon/Fri filter
-   g_openLots   =lots;
+
+   g_open[slot].active    =true;
+   g_open[slot].ticket    =posTicket;
+   g_open[slot].positionId=(long)PositionGetInteger(POSITION_IDENTIFIER);
+   g_open[slot].isBuy     =isBuy;
+   g_open[slot].entry     =entry;
+   g_open[slot].lots      =lots;
+   g_open[slot].session   =SessionName(ses);
+   g_open[slot].bias      =isBuy?"BUY":"SELL";
+   g_open[slot].model     =model;
+   g_open[slot].day       =DayOfWeekName(ToRiyadh(now,g_s)); // same day base as the Mon/Fri filter
 
    g_risk.RegisterOpen();
-   g_dtp.OnNewTrade(g_openTicket,isBuy,entry);
+   g_dtp.OnNewTrade(posTicket,isBuy,entry);
 
    double tp=PositionGetDouble(POSITION_TP);
    g_visuals.DrawTrade(TimeToString(now,TIME_DATE|TIME_MINUTES)+"_"+(string)posTicket,
                        isBuy,entry,sl,tp,now);
 
-   PrintFormat("[SS] POSITION OPENED: %s %s %.2f lots @ %.2f, SL %.2f, TP %.2f (model %s, session %s)",
-               g_openBias,_Symbol,lots,entry,sl,tp,model,g_openSession);
-   Alert(StringFormat("SS: OPENED %s %.2f lots @ %.2f, SL %.2f (%s)",
-                      g_openBias,lots,entry,sl,model));
+   int n=OpenCount();
+   PrintFormat("[SS] POSITION OPENED: %s %s %.2f lots @ %.2f, SL %.2f, TP %.2f (model %s, session %s)%s",
+               g_open[slot].bias,_Symbol,lots,entry,sl,tp,model,g_open[slot].session,
+               n>1?StringFormat(" [ADDED - %d open]",n):"");
+   Alert(StringFormat("SS: OPENED %s %.2f lots @ %.2f, SL %.2f (%s)%s",
+                      g_open[slot].bias,lots,entry,sl,model,
+                      n>1?StringFormat(" [%d open]",n):""));
 
    g_bosCount=0; g_pendingBasisTime=0; // BOS-trailing cycle ends on fill
    g_liq.Reset(); // next trade needs a fresh sweep
@@ -425,10 +552,13 @@ void ManagePending()
       OnPositionOpened(g_pendingTicket,g_pendingModel);
    else
      {
-      // fallback: locate our freshly opened position
+      // fallback: locate our freshly opened position. Skip anything already
+      // tracked — with several positions live, the newest is the only
+      // untracked one, and adopting an older one would double-book it.
       for(int i=PositionsTotal()-1;i>=0;i--)
         {
          ulong t=PositionGetTicket(i);
+         if(IsTracked(t)) continue;
          if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC)==g_s.magic)
            { OnPositionOpened(t,g_pendingModel); break; }
         }
@@ -445,7 +575,7 @@ void ManagePending()
 //+------------------------------------------------------------------+
 void TrailPendingOnNewBos(const datetime now)
   {
-   if(g_pendingTicket==0 || g_openTicket!=0) return;
+   if(g_pendingTicket==0) return;
    ENUM_BIAS bias=g_panel.Bias();
    if(bias==BIAS_NONE) return;
    ENUM_SESSION ses=g_session.CurrentSession(now);
@@ -664,7 +794,9 @@ void EvaluateAndAct(const datetime now)
    st.rangeHi=g_session.RangeHigh(); st.rangeLo=g_session.RangeLow();
    st.rangeExited=false; st.swept=false; st.sweptLevel=0; st.sweepWick=0;
    st.entryMet=false; st.entryModel=""; st.entryPrice=0; st.entryIsLimit=false;
-   st.positionOpen=(g_openTicket!=0); st.pending=(g_pendingTicket!=0);
+   st.openCount=OpenCount(); st.positionOpen=(st.openCount>0);
+   st.allAtBE=st.positionOpen && AllOpenAtBreakEven();
+   st.pending=(g_pendingTicket!=0);
    st.floatPct=0; st.note="";
 
    string sk=g_session.SessionKey(now); // session change handled in OnTick
@@ -677,8 +809,7 @@ void EvaluateAndAct(const datetime now)
    string dayDisabledNote=(_dtw.day_of_week==1 && !g_s.tradeMonday)?"Monday trading disabled":
                           (_dtw.day_of_week==5 && !g_s.tradeFriday)?"Friday trading disabled":"";
 
-   if(st.positionOpen && PositionSelectByTicket(g_openTicket))
-      st.floatPct=g_risk.FloatPercent(PositionGetDouble(POSITION_PROFIT));
+   if(st.positionOpen) st.floatPct=OpenFloatPercent();
 
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
@@ -726,14 +857,15 @@ void EvaluateAndAct(const datetime now)
    // broke out of it is the trader's MANUAL check (rule 2) - the code does
    // not gate entries on it. Arming a bias starts the hunt immediately.
    bool canAttempt = st.bias!=BIAS_NONE && st.session!=SESSION_NONE && st.inWindow
-                     && g_openTicket==0 && g_pendingTicket==0 && st.canOpen && st.dayAllowed;
+                     && g_pendingTicket==0 && CanOpenAnother() && AddDirectionAllowed(st.bias)
+                     && st.canOpen && st.dayAllowed;
 
    if(canAttempt && st.swept && haveSig)
      {
       PlaceOrder(st.bias,sig);
       st.note="ORDER SENT: "+sig.model;
       st.pending=(g_pendingTicket!=0);
-      st.positionOpen=(g_openTicket!=0);
+      st.openCount=OpenCount(); st.positionOpen=(st.openCount>0);
       if(g_pendingTicket!=0)
         {                    // start a BOS-trailing cycle for this limit
          g_pendingBasisTime=sig.structTime;
@@ -745,8 +877,17 @@ void EvaluateAndAct(const datetime now)
       if(st.bias==BIAS_NONE)                                  st.note=st.biasAuto
                                                                        ?"waiting session open (VWAP auto-bias)"
                                                                        :"arm a bias (BUY/SELL)";
-      else if(st.positionOpen)                               st.note="managing position";
       else if(st.pending)                                    st.note="limit pending";
+      else if(st.positionOpen && !g_s.addWhenBreakEven)      st.note="managing position";
+      else if(st.positionOpen && !st.allAtBE)                st.note=StringFormat(
+                                                                       "managing position (add needs SL at BE, %d open)",st.openCount);
+      else if(st.positionOpen && st.openCount>=g_s.maxOpenPositions)
+                                                             st.note=StringFormat(
+                                                                       "max open positions reached (%d)",st.openCount);
+      else if(st.positionOpen && !AddDirectionAllowed(st.bias))
+                                                             st.note=StringFormat(
+                                                                       "add blocked: %s only",
+                                                                       g_s.addDirection==ADD_DIR_COUNTER?"counter-direction":"same-direction");
       else if(st.session==SESSION_NONE)                      st.note="out of session";
       else if(!st.canOpen)                                   st.note="session cap reached";
       else if(!st.dayAllowed)                                st.note=dayDisabledNote;
@@ -1007,7 +1148,7 @@ void OnTick()
    // is how it behaves live. With manageOnBarClose the decisions are taken on
    // the new bar's open only, so the Strategy Tester's tick model stops moving
    // the result — see README "Tick model" for the trade-off.
-   if(g_openTicket!=0 && (newBar || !g_s.manageOnBarClose))
+   if(OpenCount()>0 && (newBar || !g_s.manageOnBarClose))
       g_dtp.Manage(g_trade,g_risk,g_entry);
 
    CheckClosedPosition();
@@ -1025,19 +1166,23 @@ void OnTick()
       UpdateVwap(now);
       UpdateAutoBias(now);
 
-      // While a trade or pending order is live, do NOT run full detection —
-      // manage the position (rule 14 focus). A pending CHoCH limit still
-      // tracks new BOS breaks and trails to the second-newest one.
-      if(g_openTicket!=0 || g_pendingTicket!=0)
+      // A working limit always owns the bar: it is the setup in progress, so
+      // it trails on new BOS and no fresh detection runs beside it.
+      // Otherwise detection is blocked only while a position still carries
+      // real risk — with addWhenBreakEven, positions already at break-even
+      // let the hunt continue (see CanOpenAnother).
+      if(g_pendingTicket!=0)
         {
-         if(g_openTicket==0)
-            TrailPendingOnNewBos(now);
-         if(g_openTicket!=0)
-            g_state.note="managing position";
-         else if(g_pendingTicket!=0)
-            g_state.note=(g_bosCount>1)
-                         ?StringFormat("limit pending (BOS %d, order on prev BOS)",g_bosCount)
-                         :"limit pending";
+         TrailPendingOnNewBos(now);
+         g_state.note=(g_bosCount>1)
+                      ?StringFormat("limit pending (BOS %d, order on prev BOS)",g_bosCount)
+                      :"limit pending";
+        }
+      else if(OpenCount()>0 && !CanOpenAnother())
+        {
+         g_state.note=(OpenCount()>1)
+                      ?StringFormat("managing %d positions",OpenCount())
+                      :"managing position";
         }
       else
         {
