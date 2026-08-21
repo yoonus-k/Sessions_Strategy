@@ -163,7 +163,8 @@ Changing an `input` default does **not** change the user's tester runs; see the 
 | `RiskManager.mqh` | Lot sizing from % risk, %-of-capital ↔ price conversions, and per-session trade caps keyed on `SessionKey`. See **Risk sizing** below. |
 | `DynamicTP.mqh` | Post-entry lifecycle: BE at +2%, partial at +4%, structure trail, opposing-CHoCH exit, +10% cap. |
 | `Visuals.mqh` / `Dashboard.mqh` | All chart objects. Names are prefixed and cleared per session. |
-| `TradeJournal.mqh` | Styled Excel XML report at `<AppData>/MetaQuotes/Terminal/Common/Files/SessionsStrategy_Report_<symbol>.xls`. Rebuilt in full after each close; a tester run starts it fresh. |
+| `TradeAnalytics.mqh` | Per-trade research export (`SessionsStrategy_Trades_<symbol>.csv`). **Measurement only — never gates a decision.** Owns `STradeRecord`, the excursion sampler, the counterfactual watcher and the CSV writer. |
+| `TradeJournal.mqh` | Styled Excel XML report at `<AppData>/MetaQuotes/Terminal/Common/Files/SessionsStrategy_Report_<symbol>.xls`. Buffered in memory and written once in `OnDeinit`; a tester run starts it fresh. Default OFF — the analytics CSV supersedes it. |
 
 ### Sessions
 
@@ -277,6 +278,35 @@ the opening bar cannot move its own reference). Above → BUY, below → SELL, e
 `CSessionManager::AsiaRangeExited`, `EntryWindowEndServer` and `SessionEndServer` are the leftovers
 of that decision — correct, complete, and deliberately **never called**. Leave them; wiring
 `AsiaRangeExited` back into `EvaluateAndAct` is exactly the re-added rule-2 gate above.
+
+## Trade analytics export
+
+`Include/TradeAnalytics.mqh` writes one CSV row per closed position. Three things about it are
+deliberate and easy to break:
+
+- **Excursion is folded from completed-bar highs/lows**, not sampled from ticks, so MAE/MFE is
+  identical under every tick model — the one part of this EA's output that is model-independent.
+  `SampleExcursions` also takes a per-tick mark sample, but only to cover the partial entry and
+  exit bars. The **open bar is skipped** for bar folding: its extremes predate the entry.
+- **Both journals buffer and write once in `OnDeinit`.** `CTradeJournal` used to rebuild the whole
+  `.xls` on every close, which dominated runtime. Buffering also lets the CSV emit rows in *open*
+  order while the counterfactual watcher resolves them out of order (`Flush` insertion-sorts on
+  `trade_no`). Positions still open at the end are submitted with `EXIT_END_OF_TEST`.
+- **`trade_no` is a global counter (`g_tradeSeq`)**, never `g_risk.Trades()` — that one resets on
+  every `SessionKey` change and would emit duplicate ids.
+
+`ClassifyExit` splits a broker SL fill into `STOP_LOSS` / `BREAK_EVEN` / `TRAIL_STOP` by comparing
+`finalSL` against the initial stop and the entry; EA-initiated closes read the reason `CDynamicTP`
+stamped via `Stamp()` just before calling `PositionClose`. Adding a new EA close path means adding
+a `Stamp()` call, or the row silently reports `UNKNOWN`.
+
+`beApplied` (not `beDone`) is what the CSV reports: `beDone` is set even when the broker rejected
+the modify. `SampleExcursions` pulls it live each tick so `mfe_before_be` freezes at the right
+moment.
+
+**Optimization is not wired up yet.** Parallel tester agents cannot share a file, so per-pass output
+needs `OnTester` + `FrameAdd`/`OnTesterPass`. Until that exists, do not add direct file writes to
+any optimization path.
 
 ## Conventions
 

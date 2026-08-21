@@ -82,6 +82,58 @@ enum ENUM_ADD_DIRECTION
    ADD_DIR_SAME    = 2  // Same-direction only (scale in)
   };
 
+//--- How a position ended. Broker-side fills come from DEAL_REASON; the
+//--- EA-initiated closes are stamped by CDynamicTP before it closes.
+enum ENUM_EXIT_REASON
+  {
+   EXIT_UNKNOWN        = 0,
+   EXIT_TAKE_PROFIT    = 1, // broker TP
+   EXIT_STOP_LOSS      = 2, // broker SL, still at the original stop
+   EXIT_BREAK_EVEN     = 3, // broker SL, moved to entry
+   EXIT_TRAIL_STOP     = 4, // broker SL, trailed past entry
+   EXIT_CAP            = 5, // DynamicTP hit MaxTargetMoney()
+   EXIT_OPPOSING_CHOCH = 6, // DynamicTP saw a reversal
+   EXIT_END_OF_TEST    = 7  // still open when the run ended
+  };
+
+string ExitReasonName(const ENUM_EXIT_REASON r)
+  {
+   switch(r)
+     {
+      case EXIT_TAKE_PROFIT:    return("TAKE_PROFIT");
+      case EXIT_STOP_LOSS:      return("STOP_LOSS");
+      case EXIT_BREAK_EVEN:     return("BREAK_EVEN");
+      case EXIT_TRAIL_STOP:     return("TRAIL_STOP");
+      case EXIT_CAP:            return("CAP");
+      case EXIT_OPPOSING_CHOCH: return("OPPOSING_CHOCH");
+      case EXIT_END_OF_TEST:    return("END_OF_TEST");
+     }
+   return("UNKNOWN");
+  }
+
+//--- Counterfactual state: after an early exit, would the ORIGINAL SL/TP
+//--- have resolved as a win or a loss?
+enum ENUM_CF_STATE
+  {
+   CF_NA         = 0, // exited at its own TP or SL - nothing to ask
+   CF_WATCHING   = 1,
+   CF_WOULD_WIN  = 2,
+   CF_WOULD_LOSE = 3,
+   CF_UNRESOLVED = 4  // watch window expired
+  };
+
+string CfStateName(const ENUM_CF_STATE c)
+  {
+   switch(c)
+     {
+      case CF_WATCHING:   return("WATCHING");
+      case CF_WOULD_WIN:  return("WOULD_WIN");
+      case CF_WOULD_LOSE: return("WOULD_LOSE");
+      case CF_UNRESOLVED: return("UNRESOLVED");
+     }
+   return("NA");
+  }
+
 //--- Per-trade outcome bookkeeping for session caps
 enum ENUM_TRADE_RESULT
   {

@@ -20,6 +20,7 @@
 #include "Include/RiskManager.mqh"
 #include "Include/DynamicTP.mqh"
 #include "Include/TradeJournal.mqh"
+#include "Include/TradeAnalytics.mqh"
 #include "Include/Visuals.mqh"
 #include "Include/Dashboard.mqh"
 
@@ -98,7 +99,10 @@ input bool            InpTradeMonday        = true;        // Allow trading on M
 input bool            InpTradeFriday        = true;        // Allow trading on Friday
 
 input group "Logging"
-input bool            InpWriteJournal       = true;        // Write CSV journal
+input bool            InpWriteCsv           = true;        // Write per-trade analytics CSV (MAE/MFE, context, exits)
+input bool            InpTrackCounterfactual= true;        // Track what the ORIGINAL SL/TP would have done after an early exit
+input int             InpCounterfactualBars = 720;         // How long to watch (bars; 720 = 24h on M2)
+input bool            InpWriteJournal       = false;       // Write the styled .xls journal (slower; CSV is a superset)
 input bool            InpDebug              = false;       // Print per-bar detection trace to Experts log
 
 input group "Visuals"
@@ -151,8 +155,16 @@ struct SOpenPos
    string   bias;
    string   model;
    string   day;
+   STradeRecord rec;      // live analytics record, finalised on close
   };
 SOpenPos         g_open[SS_MAX_OPEN];
+CTradeAnalytics  g_analytics;
+
+//--- context captured at order-send time, consumed by OnPositionOpened
+int              g_tradeSeq=0;      // global trade counter (g_risk.Trades() is per-SESSION)
+double           g_reqPrice=0;      // the price we ASKED for
+string           g_orderKind="";    // LIMIT / MARKET / LIMIT_DEGRADED
+int              g_reqSpread=0;
 
 ulong            g_pendingTicket=0;   // working CHoCH limit order
 string           g_pendingModel="";
@@ -244,6 +256,7 @@ int OnInit()
    g_risk.Init(g_s,sym);
    g_dtp.Init(g_s,sym);
    g_journal.Init(g_s.writeJournal,sym);
+   g_analytics.Init(InpWriteCsv,InpTrackCounterfactual,InpCounterfactualBars,sym);
    g_visuals.Init(ChartID(),InpShowVisuals,InpColorRange,InpColorAsia,InpColorLondon,InpColorNY);
    g_visuals.InitSignals(InpShowSignals,InpColorChoch,InpColorIfvg,InpColorSweep);
    g_visuals.InitSwings(InpShowSwings,InpColorSwingHi,InpColorSwingLo);
@@ -302,6 +315,36 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   // Anything still open never produced a close event, so record it here or it
+   // would silently vanish from the CSV and skew every aggregate.
+   if(InpWriteCsv)
+     {
+      for(int i=0;i<SS_MAX_OPEN;i++)
+        {
+         if(!g_open[i].active) continue;
+         STradeRecord rec=g_open[i].rec;
+         bool beA=false; datetime beT=0; int tm=0; double atr=0;
+         if(g_dtp.GetStats(g_open[i].ticket,beA,beT,tm,atr))
+           { rec.beArmed=beA; rec.beTime=beT; rec.trailMoves=tm; }
+         rec.closeTime =TimeCurrent();
+         rec.exitReason=EXIT_END_OF_TEST;
+         if(PositionSelectByTicket(g_open[i].ticket))
+           {
+            rec.exitPrice  =PositionGetDouble(POSITION_PRICE_CURRENT);
+            rec.grossProfit=PositionGetDouble(POSITION_PROFIT);
+            rec.swap       =PositionGetDouble(POSITION_SWAP);
+            rec.netProfit  =rec.grossProfit+rec.swap;
+           }
+         rec.balanceClose=AccountInfoDouble(ACCOUNT_BALANCE);
+         g_analytics.Submit(rec);
+        }
+     }
+
+   // Both journals buffer in memory and are written once, here: rebuilding a
+   // file on every close dominated runtime over a 1,500-trade run.
+   g_analytics.Flush(g_s);
+   g_journal.Flush();
+
    g_panel.Destroy();
    g_visuals.Destroy();
    g_dash.Destroy();
@@ -446,6 +489,65 @@ bool IsNewBar()
   }
 
 //+------------------------------------------------------------------+
+//| Why did this position end? Broker-side fills carry a DEAL_REASON; |
+//| an SL fill is then split by WHERE the stop had been moved to, and |
+//| an EA-initiated close takes the reason CDynamicTP stamped.        |
+//+------------------------------------------------------------------+
+ENUM_EXIT_REASON ClassifyExit(const STradeRecord &r,const ENUM_DEAL_REASON dr,
+                              const ulong ticket)
+  {
+   double tol=SymbolInfoDouble(_Symbol,SYMBOL_POINT)*2.0;
+   if(dr==DEAL_REASON_TP) return(EXIT_TAKE_PROFIT);
+   if(dr==DEAL_REASON_SL)
+     {
+      if(MathAbs(r.finalSL-r.initialSL)<=tol)   return(EXIT_STOP_LOSS);
+      if(MathAbs(r.finalSL-r.entryPrice)<=tol)  return(EXIT_BREAK_EVEN);
+      return(EXIT_TRAIL_STOP);
+     }
+   ENUM_EXIT_REASON stamped=g_dtp.CloseReasonFor(ticket);
+   if(stamped!=EXIT_UNKNOWN) return(stamped);
+   return(EXIT_UNKNOWN);
+  }
+
+//+------------------------------------------------------------------+
+//| Excursion sampling. MEASUREMENT ONLY - never gates a decision.    |
+//| Per tick we fold the mark price (covers the partial entry/exit    |
+//| bars); per new bar we fold the completed bar's true high/low,     |
+//| which is what makes MAE/MFE identical across every tick model.    |
+//+------------------------------------------------------------------+
+void SampleExcursions(const bool newBar)
+  {
+   if(!InpWriteCsv || OpenCount()==0) return;
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   datetime now=TimeCurrent();
+   double barHi=0,barLo=0; datetime barT=0;
+   if(newBar)
+     {
+      barHi=iHigh(_Symbol,g_s.tf,1);
+      barLo=iLow (_Symbol,g_s.tf,1);
+      barT =iTime(_Symbol,g_s.tf,1);
+     }
+   for(int i=0;i<SS_MAX_OPEN;i++)
+     {
+      if(!g_open[i].active) continue;
+      double mark=g_open[i].rec.isBuy?bid:ask;   // what we would exit at now
+      CTradeAnalytics::Sample(g_open[i].rec,mark,mark,now);
+      // Skip the bar the position opened on: its high/low include movement
+      // from before the entry, which would overstate both excursions.
+      if(newBar && barHi>0 && barT>g_open[i].rec.openBar)
+         CTradeAnalytics::Sample(g_open[i].rec,barHi,barLo,barT);
+      if(PositionSelectByTicket(g_open[i].ticket))
+         g_open[i].rec.finalSL=PositionGetDouble(POSITION_SL);
+      // pull the break-even flag live: Sample() freezes mfePriceBeforeBE the
+      // moment this flips, which is the whole point of the before/after split
+      bool beA=false; datetime beT=0; int tm=0; double atr=0;
+      if(g_dtp.GetStats(g_open[i].ticket,beA,beT,tm,atr))
+        { g_open[i].rec.beArmed=beA; g_open[i].rec.beTime=beT; g_open[i].rec.trailMoves=tm; }
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Detect a closed position, register result, journal it            |
 //+------------------------------------------------------------------+
 void CheckClosedPosition()
@@ -455,25 +557,54 @@ void CheckClosedPosition()
       if(!g_open[i].active) continue;
       if(PositionSelectByTicket(g_open[i].ticket)) continue; // still open
 
-      // gather realized P/L from history
-      double total=0; datetime closeTime=TimeCurrent(); double exit=0;
+      // gather realized P/L from history, split into its components so the
+      // CSV can separate a scratch that paid commission from a real loss
+      double total=0,gross=0,comm=0,swp=0;
+      datetime closeTime=TimeCurrent(); double exit=0;
+      int outDeals=0; double firstOutLots=0,firstOutMoney=0;
+      ENUM_DEAL_REASON lastReason=DEAL_REASON_CLIENT;
       if(HistorySelectByPosition(g_open[i].positionId))
         {
          int deals=HistoryDealsTotal();
          for(int k=0;k<deals;k++)
            {
             ulong d=HistoryDealGetTicket(k);
-            total+=HistoryDealGetDouble(d,DEAL_PROFIT)
-                  +HistoryDealGetDouble(d,DEAL_SWAP)
-                  +HistoryDealGetDouble(d,DEAL_COMMISSION);
+            double dp=HistoryDealGetDouble(d,DEAL_PROFIT);
+            double ds=HistoryDealGetDouble(d,DEAL_SWAP);
+            double dc=HistoryDealGetDouble(d,DEAL_COMMISSION);
+            total+=dp+ds+dc; gross+=dp; swp+=ds; comm+=dc;
             if(HistoryDealGetInteger(d,DEAL_ENTRY)==DEAL_ENTRY_OUT)
               {
-               closeTime=(datetime)HistoryDealGetInteger(d,DEAL_TIME);
-               exit     =HistoryDealGetDouble(d,DEAL_PRICE);
+               outDeals++;
+               if(outDeals==1)
+                 {
+                  firstOutLots =HistoryDealGetDouble(d,DEAL_VOLUME);
+                  firstOutMoney=dp+ds+dc;
+                 }
+               closeTime =(datetime)HistoryDealGetInteger(d,DEAL_TIME);
+               exit      =HistoryDealGetDouble(d,DEAL_PRICE);
+               lastReason=(ENUM_DEAL_REASON)HistoryDealGetInteger(d,DEAL_REASON);
               }
            }
         }
       bool win=(total>0);
+
+      //--- finalise the analytics record before the slot is freed
+      if(InpWriteCsv)
+        {
+         STradeRecord rec=g_open[i].rec;
+         bool beA=false; datetime beT=0; int tm=0; double atr=0;
+         if(g_dtp.GetStats(g_open[i].ticket,beA,beT,tm,atr))
+           { rec.beArmed=beA; rec.beTime=beT; rec.trailMoves=tm; }
+         rec.closeTime  =closeTime;
+         rec.exitPrice  =exit;
+         rec.grossProfit=gross; rec.commission=comm; rec.swap=swp; rec.netProfit=total;
+         rec.balanceClose=AccountInfoDouble(ACCOUNT_BALANCE);
+         rec.partialTaken=(outDeals>1);
+         if(rec.partialTaken){ rec.partialLots=firstOutLots; rec.partialMoney=firstOutMoney; }
+         rec.exitReason =ClassifyExit(rec,lastReason,g_open[i].ticket);
+         g_analytics.Submit(rec);
+        }
       g_risk.RegisterClose(win);
       g_journal.LogTrade(g_open[i].day,closeTime,g_open[i].session,g_open[i].bias,
                          g_open[i].model,g_open[i].lots,total,
@@ -523,8 +654,59 @@ void OnPositionOpened(const ulong posTicket,const string model)
    g_open[slot].model     =model;
    g_open[slot].day       =DayOfWeekName(ToRiyadh(now,g_s)); // same day base as the Mon/Fri filter
 
+   //--- analytics record: capture everything the setup knew at this moment
+   STradeRecord rec;
+   CTradeAnalytics::Begin(rec);
+   rec.tradeNo   =++g_tradeSeq;           // NOT g_risk.Trades() - that resets per session
+   rec.ticket    =posTicket;
+   rec.positionId=g_open[slot].positionId;
+   rec.openTime  =now;
+   rec.openBar   =iTime(_Symbol,g_s.tf,0);
+   rec.weekday   =g_open[slot].day;
+   rec.session   =g_open[slot].session;
+   rec.minsFromSessionOpen=(ses!=SESSION_NONE)
+                           ?(int)((now-g_session.SessionStartServer(now))/60):-1;
+   rec.isBuy     =isBuy;
+   rec.bias      =g_open[slot].bias;
+   rec.biasSource=(InpForcedBias!=BIAS_NONE)?"FORCED"
+                  :(g_s.biasMode==BIAS_MODE_VWAP)?"VWAP":"PANEL";
+   rec.model     =model;
+   rec.orderKind =(g_orderKind!="")?g_orderKind:"MARKET";
+   rec.bosCount  =g_bosCount;
+   rec.sweptLevel=g_liq.SweptLevel();
+   rec.sweptTime =g_liq.TargetTime();
+   rec.sweepExtreme=g_liq.SweepExtreme();
+   rec.sessionOpenPx=g_sessionOpenPx;
+   rec.vwapAtOpen=g_vwapAtOpen;
+   rec.rangeHi   =g_session.RangeHigh();
+   rec.rangeLo   =g_session.RangeLow();
+   // recorded for research only - rule 2 is still NOT an entry gate
+   rec.rangeExited=(ses!=SESSION_NONE && g_session.RangeValid())
+                   ?g_session.AsiaRangeExited(g_session.SessionStartServer(now)):false;
+   rec.spreadAtEntry=g_reqSpread;
+   rec.requestedPrice=(g_reqPrice>0)?g_reqPrice:entry;
+   rec.entryPrice=entry;
+   rec.lots      =lots;
+   rec.initialSL =sl;
+   rec.initialTP =PositionGetDouble(POSITION_TP);
+   rec.finalSL   =sl;
+   rec.riskMoney =g_risk.LossPerLot(entry,sl)*lots;   // realised 1R for this fill
+   rec.riskPct   =(AccountInfoDouble(ACCOUNT_BALANCE)>0)
+                  ?rec.riskMoney/AccountInfoDouble(ACCOUNT_BALANCE)*100.0:0;
+   rec.riskMode  =(g_s.riskMode==RISK_MODE_MONEY)?"MONEY":"PERCENT";
+   rec.balanceOpen=AccountInfoDouble(ACCOUNT_BALANCE);
+   rec.equityOpen =AccountInfoDouble(ACCOUNT_EQUITY);
+   rec.mfePrice  =entry; rec.maePrice=entry; rec.mfePriceBeforeBE=entry;
+   g_open[slot].rec=rec;
+   g_reqPrice=0; g_orderKind=""; g_reqSpread=0;
+
    g_risk.RegisterOpen();
    g_dtp.OnNewTrade(posTicket,isBuy,entry);
+
+   {
+    bool beA; datetime beT; int tm; double atr;
+    if(g_dtp.GetStats(posTicket,beA,beT,tm,atr)) g_open[slot].rec.atrAtEntry=atr;
+   }
 
    double tp=PositionGetDouble(POSITION_TP);
    g_visuals.DrawTrade(TimeToString(now,TIME_DATE|TIME_MINUTES)+"_"+(string)posTicket,
@@ -704,6 +886,12 @@ bool OpenMarket(const bool isBuy,double sl,const string model)
      }
    double tp=g_risk.PriceForMoney(g_risk.MaxTargetMoney(),lots,isBuy,entry);
 
+   // analytics context, consumed by OnPositionOpened. PlaceOrder may already
+   // have marked this as a degraded limit, so do not overwrite that.
+   if(g_orderKind=="") g_orderKind="MARKET";
+   g_reqPrice =entry;
+   g_reqSpread=(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
+
    bool ok=isBuy ? g_trade.Buy (lots,_Symbol,entry,sl,tp,"SS "+model)
                  : g_trade.Sell(lots,_Symbol,entry,sl,tp,"SS "+model);
    if(!ok)
@@ -727,6 +915,7 @@ bool OpenMarket(const bool isBuy,double sl,const string model)
 //+------------------------------------------------------------------+
 void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
   {
+   g_orderKind=""; g_reqPrice=0; g_reqSpread=0;   // fresh context per attempt
    bool   isBuy =(bias==BIAS_BUY);
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
@@ -759,8 +948,12 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
       if(isBuy && entry>=ask) useLimit=false; // price already past retrace -> market
       if(!isBuy&& entry<=bid) useLimit=false;
       if(!useLimit)
+        {
          PrintFormat("[SS] %s: price already beyond the retrace level %.2f -> MARKET entry",
                      sig.model,sig.price);
+         g_orderKind="LIMIT_DEGRADED";   // a limit that never got to work
+         g_reqPrice =sig.price;          // keep what we ASKED for, for slippage
+        }
      }
    if(!useLimit){ OpenMarket(isBuy,sl,sig.model); return; }
 
@@ -783,6 +976,10 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
       return;
      }
    double tp=g_risk.PriceForMoney(g_risk.MaxTargetMoney(),lots,isBuy,entry);
+
+   g_orderKind="LIMIT";
+   g_reqPrice =entry;
+   g_reqSpread=(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
 
    bool ok=isBuy
            ? g_trade.BuyLimit (lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model)
@@ -1171,6 +1368,12 @@ void OnTick()
    // is how it behaves live. With manageOnBarClose the decisions are taken on
    // the new bar's open only, so the Strategy Tester's tick model stops moving
    // the result — see README "Tick model" for the trade-off.
+   // sample BEFORE management, so an exit's own bar still contributes and the
+   // recorded excursion is not truncated by the close
+   SampleExcursions(newBar);
+   if(newBar && InpWriteCsv && InpTrackCounterfactual)
+      g_analytics.UpdateCounterfactuals(iHigh(_Symbol,g_s.tf,1),iLow(_Symbol,g_s.tf,1));
+
    if(OpenCount()>0 && (newBar || !g_s.manageOnBarClose))
       g_dtp.Manage(g_trade,g_risk,g_entry);
 

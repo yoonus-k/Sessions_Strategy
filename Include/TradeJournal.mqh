@@ -31,6 +31,7 @@ private:
    bool   m_friMon[];
    int    m_count;
    double m_lastBalance;
+   bool   m_dirty;        // rows added since the last Flush()
 
    void Push(const string row,const double profit,const bool friMon,
              const double balance)
@@ -200,7 +201,7 @@ public:
      {
       m_enabled=enabled;
       m_excel="SessionsStrategy_Report_"+symbol+".xls";
-      m_count=0; m_lastBalance=0;
+      m_count=0; m_lastBalance=0; m_dirty=false;
       if(!m_enabled) return;
       // a tester run starts fresh (otherwise every backtest would pile its
       // trades onto the previous run's file); a live chart continues it
@@ -223,7 +224,16 @@ public:
              m_count+1,day,TimeToString(closeTime,TIME_DATE),session,bias,model,
              lots,profitMoney,profitMoney>0?"WIN":"LOSS",balance,exBal);
       Push(row,profitMoney,friMon,balance);
+      m_dirty=true;   // written once by Flush(), not rebuilt on every close
+     }
+
+   //--- Dump the buffered rows to disk. Called from OnDeinit.
+   void Flush()
+     {
+      if(!m_enabled || !m_dirty) return;
       WriteExcel();
+      m_dirty=false;
+      PrintFormat("[SS] JOURNAL: wrote %d trades to Common/Files/%s",m_count,m_excel);
      }
   };
 

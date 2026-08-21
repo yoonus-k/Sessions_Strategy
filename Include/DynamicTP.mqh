@@ -28,8 +28,11 @@ struct STpTrade
    bool      isBuy;
    double    entry;
    double    atrAtEntry;
-   bool      beDone;
+   bool      beDone;      // threshold reached (set even if the modify failed)
+   bool      beApplied;   // the stop ACTUALLY moved - what analytics reports
+   datetime  beTime;
    bool      partialDone;
+   int       trailMoves;  // successful trailing modifies
   };
 
 class CDynamicTP
@@ -39,6 +42,17 @@ private:
    string    m_symbol;
    int       m_atrHandle;
    STpTrade  m_t[SS_MAX_OPEN];
+   //--- why the EA closed a position, kept until CheckClosedPosition reads it
+   ulong            m_closedTicket[SS_MAX_OPEN];
+   ENUM_EXIT_REASON m_closedReason[SS_MAX_OPEN];
+   int              m_closedIdx;
+
+   void Stamp(const ulong ticket,const ENUM_EXIT_REASON why)
+     {
+      m_closedTicket[m_closedIdx]=ticket;
+      m_closedReason[m_closedIdx]=why;
+      m_closedIdx=(m_closedIdx+1)%SS_MAX_OPEN;
+     }
 
    double ATR() const
      {
@@ -113,15 +127,17 @@ private:
         {
          double be=t.entry;
          if((t.isBuy && (sl<be||sl==0)) || (!t.isBuy && (sl>be||sl==0)))
-            trade.PositionModify(t.ticket,be,tp);
-         t.beDone=true;
+            if(trade.PositionModify(t.ticket,be,tp))
+              { t.beApplied=true; t.beTime=TimeCurrent(); }
+         t.beDone=true;   // do not retry; beApplied records whether it took
         }
 
       // Nothing else acts before the default target (rule 14)
       if(profit<rm.DefaultTargetMoney()) return;
 
       // 2) Hard cap (rule 11)
-      if(profit>=rm.MaxTargetMoney()){ trade.PositionClose(t.ticket); t.active=false; return; }
+      if(profit>=rm.MaxTargetMoney())
+        { Stamp(t.ticket,EXIT_CAP); trade.PositionClose(t.ticket); t.active=false; return; }
 
       // 3) Optional partial at the default target
       if(m_s.usePartialTP && !t.partialDone)
@@ -137,7 +153,8 @@ private:
 
       // 4) Runner: momentum decides extend vs take-profit
       bool strong,weak; Momentum(em,t.isBuy,strong,weak);
-      if(weak){ trade.PositionClose(t.ticket); t.active=false; return; }
+      if(weak)
+        { Stamp(t.ticket,EXIT_OPPOSING_CHOCH); trade.PositionClose(t.ticket); t.active=false; return; }
 
       // STRONG (or neutral): trail behind the latest structure swing
       double swing;
@@ -149,15 +166,16 @@ private:
          if(t.isBuy)  newSL=MathMax(newSL,t.entry);
          else         newSL=MathMin(newSL,t.entry);
          bool improve=t.isBuy?(newSL>sl):(newSL<sl || sl==0);
-         if(improve) trade.PositionModify(t.ticket,newSL,tp);
+         if(improve && trade.PositionModify(t.ticket,newSL,tp)) t.trailMoves++;
         }
      }
 
 public:
    void Init(const SSettings &s,const string symbol)
      {
-      m_s=s; m_symbol=symbol;
-      for(int i=0;i<SS_MAX_OPEN;i++) m_t[i].active=false;
+      m_s=s; m_symbol=symbol; m_closedIdx=0;
+      for(int i=0;i<SS_MAX_OPEN;i++)
+        { m_t[i].active=false; m_closedTicket[i]=0; m_closedReason[i]=EXIT_UNKNOWN; }
       m_atrHandle=iATR(symbol,s.tf,14);
      }
    void Deinit(){ if(m_atrHandle!=INVALID_HANDLE) IndicatorRelease(m_atrHandle); }
@@ -177,10 +195,35 @@ public:
          m_t[i].active=true;  m_t[i].ticket=ticket;
          m_t[i].isBuy=isBuy;  m_t[i].entry=entry;
          m_t[i].atrAtEntry=ATR();
-         m_t[i].beDone=false; m_t[i].partialDone=false;
+         m_t[i].beDone=false; m_t[i].beApplied=false; m_t[i].beTime=0;
+         m_t[i].partialDone=false; m_t[i].trailMoves=0;
          return;
         }
       PrintFormat("[SS] WARNING: DynamicTP has no free slot for %I64u - position will be UNMANAGED",ticket);
+     }
+
+   //--- Lifecycle facts for the analytics row. Call BEFORE Clear().
+   bool GetStats(const ulong ticket,bool &beApplied,datetime &beTime,
+                 int &trailMoves,double &atrAtEntry) const
+     {
+      for(int i=0;i<SS_MAX_OPEN;i++)
+         if(m_t[i].active && m_t[i].ticket==ticket)
+           {
+            beApplied =m_t[i].beApplied;
+            beTime    =m_t[i].beTime;
+            trailMoves=m_t[i].trailMoves;
+            atrAtEntry=m_t[i].atrAtEntry;
+            return(true);
+           }
+      return(false);
+     }
+
+   //--- Why the EA closed this ticket, if it was the EA that closed it
+   ENUM_EXIT_REASON CloseReasonFor(const ulong ticket) const
+     {
+      for(int i=0;i<SS_MAX_OPEN;i++)
+         if(m_closedTicket[i]==ticket) return(m_closedReason[i]);
+      return(EXIT_UNKNOWN);
      }
 
    //--- drop one tracked position (it closed), or all of them

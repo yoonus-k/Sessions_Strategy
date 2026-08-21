@@ -394,7 +394,10 @@ cycle. Trade caps are unchanged — every add still consumes one of `MaxTradesPe
 | Adds | `MaxOpenPositions` | 2 | Ceiling on concurrent positions (1–8) |
 | Caps | `MaxTradesPerSession` | 3 | Rule 10 (charter says 2) |
 | Caps | `StopAfterFirstWin` | true | Rule 10 |
-| Logging | `WriteTradeJournalCSV` | true | Rule 16 helper |
+| Logging | `WriteCsv` | true | Per-trade analytics CSV — see the **Trade analytics CSV** section |
+| Logging | `TrackCounterfactual` | true | Watch the original SL/TP after an early exit |
+| Logging | `CounterfactualBars` | 720 | Watch window (720 bars = 24h on M2) |
+| Logging | `WriteTradeJournalCSV` | false | The styled `.xls`; the CSV is a superset |
 | Logging | `Debug` | false | Per-bar detection trace to the Experts log |
 | Visuals | `ShowVisuals` | true | Range/session boxes |
 | Visuals | `ShowSignals` | true | Sweep / CHoCH / IFVG / trade levels |
@@ -582,3 +585,71 @@ Code is written but **not yet compiled in MetaEditor** in this environment — S
 checkpoint; fix any compiler messages (or paste them to me). The IFVG/CHoCH detection is **v1** and is
 best validated in **visual mode** using the on-chart marks, then tuned (`SwingStrength`, `ChochRetrace`).
 ```
+
+---
+
+## 12. Trade analytics CSV
+
+`WriteCsv` (default **on**) writes one row per closed position to
+`<AppData>/MetaQuotes/Terminal/Common/Files/SessionsStrategy_Trades_<symbol>.csv` — around 70
+columns of excursion, setup context and exit anatomy, for analysis in pandas or Excel.
+
+**Nothing in this path influences a trading decision.** It is pure measurement, so enabling it
+cannot change a backtest's trades.
+
+### Excursion is measured from bars, not ticks
+
+MAE/MFE folds each **completed bar's high and low** into the running excursion, plus a per-tick
+mark-price sample that covers only the partial entry and exit bars. A bar's high and low *are* the
+true intrabar extremes, so the exported excursion is **identical under every tick model** — unlike
+the exits themselves (see the **Tick model** section). The bar the position opened on is
+deliberately skipped for bar folding, since its extremes include movement from before the entry.
+
+### Column groups
+
+| Group | Contents |
+|-------|----------|
+| Identity / timing | `trade_no` (global, not per-session), tickets, open/close in server and Riyadh time, weekday, session, `mins_from_session_open`, duration in minutes and bars |
+| Setup context | bias and its source, model, `order_kind` (`LIMIT` / `MARKET` / `LIMIT_DEGRADED`), `bos_count`, swept level and time, session open vs VWAP, prior-day 4H range and `range_exited`, ATR and spread at entry |
+| Execution / risk | requested vs filled price and `slippage_points`, lots, initial SL/TP, SL distance in price and money, `risk_money` (= 1R), risk mode, balance and equity at open |
+| Excursion | `mfe_*` / `mae_*` in price, money and **R**, their timestamps, the before/after break-even split, `giveback_r`, `efficiency` |
+| Exit | `exit_reason`, gross / commission / swap / net split apart, `net_r`, `net_pct_balance`, whether break-even actually applied, partial details, `trail_moves`, `final_sl` |
+| Counterfactual | `post_exit_outcome`, `post_exit_mfe_r` |
+
+`efficiency` is `net / mfe_money` — the share of the best unrealised gain actually kept. It is left
+**blank**, not zero, when a trade never traded positive, so it cannot be averaged into a misleading
+number.
+
+### Exit reasons
+
+`TAKE_PROFIT` · `STOP_LOSS` · `BREAK_EVEN` · `TRAIL_STOP` · `CAP` · `OPPOSING_CHOCH` ·
+`END_OF_TEST`. Broker-side fills are read from `DEAL_REASON`; an SL fill is then split by *where*
+the stop had been moved to, and EA-initiated closes take the reason `CDynamicTP` stamped before
+closing.
+
+### Counterfactual tracking
+
+When a trade exits early — break-even, trail, cap, or opposing CHoCH — `TrackCounterfactual` keeps
+watching its **original** SL and TP for `CounterfactualBars` bars and records which one price would
+have touched first:
+
+- `WOULD_WIN` / `WOULD_LOSE` / `UNRESOLVED` (window expired) / `NA` (exited at its own TP or SL).
+- When both levels fall inside the same bar the intrabar order is unknowable, so it resolves as
+  `WOULD_LOSE`. That biases the answer *against* removing the early exit, which is the safe
+  direction to be wrong in.
+
+This answers "is the break-even trigger earning its keep?" from data rather than argument: filter
+`exit_reason == BREAK_EVEN` and read the `WOULD_WIN` share against the break-even win rate implied
+by your reward ratio.
+
+### Both journals are written once, at the end
+
+`CTradeAnalytics` and `CTradeJournal` buffer rows in memory and write in `OnDeinit`. Rebuilding the
+`.xls` on every close was the slowest thing in the EA over a 1,500-trade run. Buffering also lets
+the CSV emit rows in **open order** even though the counterfactual watcher resolves them out of
+order. Positions still open when the run ends are written with `exit_reason = END_OF_TEST` rather
+than being silently dropped.
+
+> **Optimization is a separate channel and is not implemented yet.** Parallel tester agents cannot
+> share one file, so per-pass results need `OnTester` + frames rather than direct writes. The
+> per-trade CSV is skipped during optimization runs.
