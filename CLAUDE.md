@@ -130,23 +130,44 @@ between those two models, with the win rate *rising* 54.5% → 62.5% — early B
 - **Never compare `Total Net Profit` across runs.** `LotForRisk` sizes off the live balance, so
   results compound; compare Profit Factor and Expected Payoff as a % of balance instead.
 
-### Shipped defaults = the validated backtest configuration
+### Shipped defaults = the validated backtest configuration, plus unvalidated CSV-estimated changes
 
-The `input` defaults mirror the 1,353-trade real-tick run (XAUUSD M2, 2025-01-02 → 2026-08-14,
-PF 1.60, 14.07% win rate on decisive trades, 9.89:1 RR, 25.1% normalised drawdown). Two of them
-deliberately switch code paths **off**, so don't "fix" the resulting dead code:
+Most `input` defaults mirror the 602-trade real-tick run this history references most recently
+(XAUUSD M2). `defaultTargetPercent = 2.5` / `maxTargetPercent = 5.0` are **unequal on purpose** —
+`Manage()` tests the cap at `DynamicTP.mqh` before the partial and the trail, so equal values would
+make it always close and return first, before `Momentum()`, `NearestSwing()` and the opposing-CHoCH
+exit ever run. Do not set them equal without meaning to disable that path again. `usePartialTP =
+true` / `partialPercent = 55` and `addDirection = ADD_DIR_SAME` also reflect that run's actual
+tester config, not the earlier "5%/5%, partial off" configuration this file used to describe.
 
-- `defaultTargetPercent == maxTargetPercent == 5.0`. `Manage()` tests the cap at
-  `DynamicTP.mqh:135` **before** the partial (138) and the trail (155), so it always closes and
-  returns first. The partial, the structure trail, `Momentum()`, `NearestSwing()` and the
-  opposing-CHoCH exit are all unreachable at these settings. Raising `maxTargetPercent` above
-  `defaultTargetPercent` is what re-enables them.
-- `usePartialTP = false` — off independently of the above.
-- `breakEvenAtPercent = 0.25` with `riskPercent = 0.5` puts break-even at **≈0.5R**. It is a
-  hair trigger and it dominates the outcome distribution: 692 of 1,353 trades (51%) closed at
-  break-even. Whether it earns its keep is unresolved — at 9.89:1 RR it only needs 9.2% of those
-  scratches to have been eventual winners to be net negative.
-- `useLondon = false` — the London session has never been backtested.
+`breakEvenAtPercent = 0.25` with `riskPercent = 0.5` puts break-even at **≈0.5R**. It is a hair
+trigger and it dominates the outcome distribution (48% of the 602 trades closed at break-even in
+the reference run). Whether it earns its keep was measured directly via counterfactual tracking on
+an earlier run and came out net positive — see the trade analytics CSV section below.
+
+`useLondon = false` — the London session has never been backtested.
+
+**Three settings below are analysis-driven but NOT yet validated by a real Strategy Tester run —
+only estimated from replaying the 602-trade CSV export (`mae_r`/`mfe_r`/`net_r` columns), which
+lacks intrabar path data:**
+
+- `entryWindowMinutes = 30` (narrowed from 120) — trades entered >30min after session open were
+  statistically indistinguishable from break-even in the export (Welch p=0.0175); before 30min,
+  expectancy was +0.545R vs +0.006R after.
+- `maxSlAtrRatio = 2.5` (new gate, `PlaceOrder` in the main file) — rejects an entry before sizing
+  if the SL distance versus current ATR exceeds this ratio. Wide-SL trades were net negative as a
+  group (Welch p=0.0099).
+- `useRatchet = true`, `ratchetTriggerR = 2.0`, `ratchetLockFrac = 0.5` (new mechanism,
+  `CDynamicTP::ManageOne`) — once a position's peak profit clears `ratchetTriggerR` × the trade's
+  own risk money, the SL ratchets to `ratchetLockFrac` of that peak, one-way, before the rule-14
+  gate. Motivated by 99 trades reaching mfe_r ≥ 3 of which 40 gave the entire move back to
+  break-even (+831R total giveback across trades with mfe_r ≥ 0.3, against +73.9R net profit on
+  that export). The simulated uplift is an **optimistic upper bound** — it assumes the mechanism
+  always captures exactly the locked fraction of the peak regardless of intrabar timing. Treat the
+  first live tester run with it enabled as the real measurement.
+
+A rejected trade under `maxSlAtrRatio` prints `[SS] SKIPPED ... SL/ATR ... exceeds max` and does
+not set the dashboard `Note` (consistent with the other pre-existing SKIPPED paths).
 
 Changing an `input` default does **not** change the user's tester runs; see the `.set` note above.
 

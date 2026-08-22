@@ -1,11 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                                    DynamicTP.mqh  |
 //|  Momentum + structure runner (README Section 6).                 |
-//|   +2%  -> break-even (rule 7)                                    |
-//|   +4%  -> default target: optional partial, then runner          |
-//|   4-10%-> trail behind structure, extend while momentum is STRONG |
-//|   +10% -> hard cap (rule 11)                                     |
-//|  Never auto-closes before +4% (rule 14).                         |
+//|   BE trigger    -> break-even (rule 7)                           |
+//|   ratchet trigger (peak R) -> lock a rising floor at a fraction  |
+//|                    of peak profit; independent of the gate below |
+//|   default target -> optional partial, then runner                |
+//|   default->cap  -> trail behind structure, extend while STRONG   |
+//|   cap           -> hard cap (rule 11)                            |
+//|  Only BE and the ratchet may act before the default target;      |
+//|  everything else waits for it (rule 14).                         |
 //|                                                                  |
 //|  Tracks up to SS_MAX_OPEN positions at once: with                |
 //|  addWhenBreakEven the EA may hold several, and each carries its   |
@@ -28,6 +31,7 @@ struct STpTrade
    bool      isBuy;
    double    entry;
    double    atrAtEntry;
+   double    peakProfit;  // running max POSITION_PROFIT seen (profit-ratchet input)
    bool      beDone;      // threshold reached (set even if the modify failed)
    bool      beApplied;   // the stop ACTUALLY moved - what analytics reports
    datetime  beTime;
@@ -120,6 +124,8 @@ private:
       double sl    =PositionGetDouble(POSITION_SL);
       double tp    =PositionGetDouble(POSITION_TP);
 
+      if(profit>t.peakProfit) t.peakProfit=profit;
+
       // All three thresholds come from CRiskManager in MONEY, so this logic is
       // identical whether the user configured % of balance or a fixed amount.
       // 1) Break-even (rule 7)
@@ -130,6 +136,28 @@ private:
             if(trade.PositionModify(t.ticket,be,tp))
               { t.beApplied=true; t.beTime=TimeCurrent(); }
          t.beDone=true;   // do not retry; beApplied records whether it took
+        }
+
+      // 1b) Profit ratchet: the backtest showed trades that reach 3R+ peak
+      // excursion but exit at break-even give back ~830R combined (11x net
+      // profit) — the gap between BE (~0.5R) and the default target has no
+      // protection beyond the flat BE line. Once peak profit clears
+      // ratchetTriggerR x this trade's own risk, lock ratchetLockFrac of that
+      // peak as a rising SL floor, independent of the default-target gate below.
+      if(m_s.useRatchet)
+        {
+         double riskMoney=rm.RiskMoney();
+         if(riskMoney>0 && t.peakProfit>=m_s.ratchetTriggerR*riskMoney)
+           {
+            double floorMoney=m_s.ratchetLockFrac*t.peakProfit;
+            double floorPx=rm.PriceForMoney(floorMoney,lots,t.isBuy,t.entry);
+            if(floorPx>0)
+              {
+               bool improve=t.isBuy?(floorPx>sl):(floorPx<sl || sl==0);
+               if(improve && trade.PositionModify(t.ticket,floorPx,tp))
+                 { sl=floorPx; t.trailMoves++; }
+              }
+           }
         }
 
       // Nothing else acts before the default target (rule 14)
@@ -195,6 +223,7 @@ public:
          m_t[i].active=true;  m_t[i].ticket=ticket;
          m_t[i].isBuy=isBuy;  m_t[i].entry=entry;
          m_t[i].atrAtEntry=ATR();
+         m_t[i].peakProfit=0;
          m_t[i].beDone=false; m_t[i].beApplied=false; m_t[i].beTime=0;
          m_t[i].partialDone=false; m_t[i].trailMoves=0;
          return;

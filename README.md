@@ -252,36 +252,43 @@ numbers in both modes.
 
 ## 6. Dynamic Take-Profit Engine ⭐
 
-**Default target is 4%. Beyond that, ride toward the nearest high/low — or to the 10% cap — while
-momentum says the move continues.**
+**Default target is 2.5%. Beyond that, ride toward the nearest high/low — or to the 5% cap — while
+momentum says the move continues. A profit ratchet protects the gap between break-even and the
+default target, which previously had no protection at all.**
 
 ### 6.1 Principle
-- The trade carries a hard SL (at the wick) and a hard safety cap at **+10%** (rule 11).
-- **4% is the default objective**, not a structural calculation — every valid setup targets at least 4%.
-- Between 4% and 10%, the exit is decided by **structure + momentum**, so strong moves aren't cut short and weak ones aren't given back.
+- The trade carries a hard SL (at the wick) and a hard safety cap at **+5%** (rule 11).
+- **2.5% is the default objective**, not a structural calculation — every valid setup targets at least 2.5%.
+- Between 2.5% and 5%, the exit is decided by **structure + momentum**, so strong moves aren't cut short and weak ones aren't given back.
+- Between break-even and 2.5%, the **profit ratchet** (Section 6.4a) locks a rising floor instead of leaving the position exposed down to the flat BE line.
 
 ### 6.2 Lifecycle of a trade
 ```
-+0%  → entry. SL at wick. Default TP target = +4%. Hard cap = +10%.
-+2%  → SL moved to break-even (rule 7).
-+4%  → DEFAULT TARGET reached. Decision point:
-        ├─ Momentum WEAK / nearest structure right here → take the 4% (optionally
-        │   close `PartialPercent` and trail the rest).
-        └─ otherwise → don't close; trail SL behind the last swing and ride toward 10%.
-4%→10% → RUNNER. Rides the structure trail toward the 10% cap.
-         The ONLY early exit is a genuine reversal (opposing CHoCH). A stall or a
-         single opposite candle does NOT close it — the trailing stop handles those.
-+10% → hard cap. Close remainder (rule 11).
++0%     → entry. SL at wick. Default TP target = +2.5%. Hard cap = +5%.
+~0.5R   → SL moved to break-even (rule 7).
+2R      → RATCHET arms: SL floor = RatchetLockFrac x peak profit-so-far, and re-arms
+           higher every time a new peak profit is made. Runs independently of the
+           default-target gate below — it is live in the BE→default-target gap.
++2.5%   → DEFAULT TARGET reached. Decision point:
+           ├─ Momentum WEAK / nearest structure right here → take the 2.5% (optionally
+           │   close `PartialPercent` and trail the rest).
+           └─ otherwise → don't close; trail SL behind the last swing and ride toward 5%.
+2.5%→5% → RUNNER. Rides the structure trail toward the 5% cap, floor no lower than
+          the ratchet's own floor.
+          The ONLY early exit is a genuine reversal (opposing CHoCH). A stall or a
+          single opposite candle does NOT close it — the trailing stop handles those.
++5%     → hard cap. Close remainder (rule 11).
 ```
 
 ### 6.3 Runner exit rules (let winners run)
-After +4% the position **rides the structure trail toward the +10% cap**. It is closed early
-**only** by a genuine close-confirmed **opposing CHoCH** (a real structure reversal against the
+After the default target the position **rides the structure trail toward the cap**. It is closed
+early **only** by a genuine close-confirmed **opposing CHoCH** (a real structure reversal against the
 trade). It is **not** closed by a stall, by ATR contraction, or by a single opposite candle — those
 were closing trades prematurely. Profit is protected instead by:
+- the **profit ratchet** (Section 6.4a), then
 - the **structure trailing stop** (Section 6.4), and
-- **break-even** at +2%, and
-- the hard **+10%** cap.
+- **break-even**, and
+- the hard cap.
 
 `MomentumBodyATR` / `MomentumStallBars` are still used to classify a bar as STRONG (displacement +
 new extreme) for future tuning, but a non-strong bar no longer forces an exit.
@@ -289,22 +296,43 @@ new extreme) for future tuning, but a non-strong bar no longer forces an exit.
 ### 6.4 The structure trail
 While the runner is open, SL trails just beyond the most recent confirmed swing in the trade
 direction, padded by `TrailPadPoints`. This banks most of an extended move even if it reverses
-before 10%, and is what actually takes a trade out when momentum fades (rather than a hard close).
+before the cap, and is what actually takes a trade out when momentum fades (rather than a hard close).
+
+### 6.4a The profit ratchet
+
+**Backtest finding that motivated this:** of the 602-trade export, 99 trades reached mfe_r ≥ 3
+(peak excursion ≥ 3x risk) but 40 of those closed at break-even — giving back the entire move.
+Across every trade with mfe_r ≥ 0.3, total giveback (peak − realized) summed to +831R, over 11x
+the strategy's entire net profit. The cause: between the break-even trigger (~0.5R) and the
+default target (previously 5R, now 2.5% ≈ a much smaller gap but still real), nothing moved the
+stop — a trade could run to +3R and fall all the way back to flat with no intervention.
+
+`UseRatchet` (default **true**): once a position's peak profit reaches `RatchetTriggerR` (default
+**2.0**, in units of the trade's own risk money) the SL is moved to `RatchetLockFrac` (default
+**0.5**) of that peak, and re-armed every time a new peak is made — a one-way ratchet, never
+loosened. It runs in `CDynamicTP::ManageOne` **before** the `rule 14` gate that holds everything
+else back until the default target, alongside break-even, since like break-even it only tightens
+the stop and never closes the position early.
+
+This was validated only against `mfe_r`/`net_r` summary columns from the CSV export (an optimistic
+upper bound — it assumes the mechanism can always capture exactly the locked fraction of the peak
+regardless of when the peak occurred intrabar), not a full tick-by-tick simulation. Treat the first
+live Strategy Tester run with it enabled as the real measurement, not the CSV estimate.
 
 ### 6.5 Charter compliance
-- **Never closes before 4%** (rule 14): the runner and partials only activate at/after +4%; before that the trail never sits below break-even.
-- **Min default / Max cap** (rules 11, 12): `DefaultTargetPercent` and `MaxTargetPercent`. **They ship equal (5% / 5%)** — see the warning under §6.6.
+- **Never closes before the default target** (rule 14): the runner and partials only activate at/after it; before that, only break-even and the ratchet may tighten the stop — neither one closes the position.
+- **Min default / Max cap** (rules 11, 12): `DefaultTargetPercent` and `MaxTargetPercent`. They now ship **unequal (2.5% / 5%)**, so the partial and the structure trail are live — see §6.6.
 - **Target = prior high/low** (rule 8): every *extension* target is a real structural swing; momentum only decides whether to hold to the next one.
 
 ### 6.6 Tunable behavior
-- `UsePartialTP` (default **false**) + `PartialPercent` (default **50%**): close part at the default target to lock the minimum, ride the rest on the trail. Set `true` to bank a partial.
+- `UsePartialTP` (default **true**) + `PartialPercent` (default **55%**): close part at the default target to lock the minimum, ride the rest on the trail.
+- `UseRatchet` / `RatchetTriggerR` / `RatchetLockFrac` — Section 6.4a.
 
-> **Equal targets disable the runner.** `DynamicTP::Manage` tests the cap *before* the partial and
-> the trail (`DynamicTP.mqh:132-147`), so whenever `DefaultTargetPercent == MaxTargetPercent` the
-> function closes the position and returns before either can run. The shipped defaults are 5% / 5%,
-> which is why the validated backtest shows a hard wall at +5% and no trade above +5.37%. To use the
-> partial or the structure trail at all, set `MaxTargetPercent` strictly greater than
-> `DefaultTargetPercent`.
+> **Equal targets disable the runner and the ratchet's downstream partner.** `DynamicTP::Manage`
+> tests the cap *before* the partial and the trail, so whenever `DefaultTargetPercent ==
+> MaxTargetPercent` the function closes the position and returns before either can run. The
+> defaults now ship **unequal** (2.5% / 5%) specifically so this path is live — do not set them
+> equal without meaning to disable the partial/trail again.
 
 
 ### 6.7 Adding on a risk-free trade
@@ -358,7 +386,7 @@ cycle. Trade caps are unchanged — every add still consumes one of `MaxTradesPe
 | Sessions | `BrokerToRiyadhOffsetHours` | TBD | Server → Riyadh |
 | Asia | `DayCloseHourRiyadh` | 00:00 | Anchor for prior-day last-4h range |
 | Asia | `RangeLengthHours` | 4 | Rule 2 |
-| Timing | `EntryWindowMinutes` | 120 | Rule 3 (configurable) |
+| Timing | `EntryWindowMinutes` | 30 | Rule 3 (configurable) — narrowed from 120: entries after 30min post-session-open are ~break-even in the 602-trade export (Welch p=0.0175) |
 | Bias | `BiasMode` | VWAP | Rule 17: `VWAP` = auto from the session open, `MANUAL` = panel only |
 | Bias | `VwapAnchor` | Day | VWAP reset period (Day = Riyadh day-close hour / Week = Monday) |
 | Bias | `VwapSource` | hlc3 | VWAP price source (Pine `src`) |
@@ -371,6 +399,7 @@ cycle. Trade caps are unchanged — every add still consumes one of `MaxTradesPe
 | Entry | `ChochRetrace` | 0.25 | Limit at 25% retrace of breaking leg |
 | Entry | `PreSweepHours` | 8.0 | Hours left of session open to find the low/high to sweep |
 | Entry | `DetectPreHours` | 2.0 | CHoCH/IFVG structure sees this many hours before the open (0 = session only) |
+| Entry | `MaxSlAtrRatio` | 2.5 | Reject the entry if SL distance / ATR exceeds this (0 = off). Wide-SL trades are net negative as a group (Welch p=0.0099 on the 602-trade export) |
 | Risk | `RiskMode` | % of balance | Unit for risk **and** every target — see **Risk unit** |
 | Risk | `RiskPercent` | 0.5 | Rule 9 (charter says 0.95; 0.5 is the validated default) — `%` mode |
 | Risk | `RiskMoney` | 500 | Fixed risk per trade in account currency — `$` mode |
@@ -378,26 +407,29 @@ cycle. Trade caps are unchanged — every add still consumes one of `MaxTradesPe
 | Risk | `SLBufferPoints` | 0 | Pad beyond anchor |
 | Risk | `BreakEvenAtPercent` | 0.25 | Rule 7 — ≈0.5R at `RiskPercent = 0.5`. Hair-trigger; see **Tick model** — `%` mode |
 | Risk | `BreakEvenAtMoney` | 250 | Same trigger in money — `$` mode |
-| TP | `DefaultTargetPercent` | 5.0 | Rule 12 default — `%` mode |
+| TP | `DefaultTargetPercent` | 2.5 | Rule 12 default — `%` mode |
 | TP | `DefaultTargetMoney` | 5000 | Rule 12 default — `$` mode |
-| TP | `MaxTargetPercent` | 5.0 | Rule 11 cap — **equal to the default target, which disables the partial and the trail** — `%` mode |
+| TP | `MaxTargetPercent` | 5.0 | Rule 11 cap — **strictly above the default target, so the partial and the trail are live** — `%` mode |
 | TP | `MaxTargetMoney` | 5000 | Rule 11 cap — `$` mode |
-| TP | `UsePartialTP` | false | Section 6.6 |
-| TP | `PartialPercent` | 50 | Closed at +4% |
+| TP | `UsePartialTP` | true | Section 6.6 |
+| TP | `PartialPercent` | 55 | Closed at the default target |
 | TP | `MomentumBodyATR` | 1.3 | Displacement |
 | TP | `MomentumStallBars` | 3 | Stall/progress window |
 | TP | `AtrContractionFactor` | 0.6 | Exhaustion |
 | TP | `TrailPadPoints` | broker-tuned | Structure-trail pad |
+| Ratchet | `UseRatchet` | true | Lock a rising SL floor once peak profit clears `RatchetTriggerR` — see Section 6.4a |
+| Ratchet | `RatchetTriggerR` | 2.0 | Peak profit / trade's own risk money needed to arm the ratchet |
+| Ratchet | `RatchetLockFrac` | 0.5 | Fraction of peak profit locked as the floor once armed |
 | Cadence | `ManageOnBarClose` | true | Run the management stack on bar close only — see **Tick model** |
 | Adds | `AddWhenBE` | false | Allow a new position once every open one is at break-even — see **Adding on a risk-free trade** |
-| Adds | `AddDirection` | Both | Which direction may be added: both / counter-only / same-only |
+| Adds | `AddDirection` | Same only | Which direction may be added: both / counter-only / same-only |
 | Adds | `MaxOpenPositions` | 2 | Ceiling on concurrent positions (1–8) |
 | Caps | `MaxTradesPerSession` | 3 | Rule 10 (charter says 2) |
 | Caps | `StopAfterFirstWin` | true | Rule 10 |
 | Logging | `WriteCsv` | true | Per-trade analytics CSV — see the **Trade analytics CSV** section |
 | Logging | `TrackCounterfactual` | true | Watch the original SL/TP after an early exit |
 | Logging | `CounterfactualBars` | 720 | Watch window (720 bars = 24h on M2) |
-| Logging | `WriteTradeJournalCSV` | false | The styled `.xls`; the CSV is a superset |
+| Logging | `WriteTradeJournalCSV` | true | The styled `.xls`; the CSV is a superset |
 | Logging | `Debug` | false | Per-bar detection trace to the Experts log |
 | Visuals | `ShowVisuals` | true | Range/session boxes |
 | Visuals | `ShowSignals` | true | Sweep / CHoCH / IFVG / trade levels |

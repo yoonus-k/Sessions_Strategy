@@ -39,7 +39,7 @@ input string          InpLondonStart        = "09:00";     // London session sta
 input string          InpLondonEnd          = "12:00";     // London session end
 input string          InpNYStart            = "15:00";     // NY session start
 input string          InpNYEnd              = "18:00";     // NY session end
-input int             InpEntryWindowMinutes = 120;         // Entry window from open (min)
+input int             InpEntryWindowMinutes = 30;          // Entry window from open (min)
 
 input group "Bias source (VWAP auto-bias)"
 input ENUM_BIAS_MODE   InpBiasMode          = BIAS_MODE_VWAP;  // Bias source: manual panel / VWAP at session open
@@ -60,6 +60,7 @@ input ENUM_ENTRY_MODEL InpEntryModel        = ENTRY_EITHER; // Entry: CHoCH or I
 input double          InpChochRetrace       = 0.25;        // CHoCH limit retrace of breaking leg (0..1)
 input double          InpPreSweepHours      = 8.0;         // Look this many hours left of session open for the low/high to sweep
 input double          InpDetectPreHours     = 2.0;         // CHoCH/IFVG structure sees this many hours before session open (0 = session bars only)
+input double          InpMaxSlAtrRatio      = 2.5;         // Max initial SL distance vs ATR (0 = no filter)
 
 input group "Risk"
 input ENUM_RISK_MODE  InpRiskMode           = RISK_MODE_PERCENT; // Risk & target unit
@@ -71,12 +72,12 @@ input double          InpBreakEvenAtPercent = 0.25;        // [%] Move SL to BE 
 input double          InpBreakEvenAtMoney   = 250.0;       // [$] Move SL to BE at (money)
 
 input group "Targets"
-input double          InpDefaultTargetPct   = 5.0;         // [%] Default target (%)
+input double          InpDefaultTargetPct   = 2.5;         // [%] Default target (%)
 input double          InpDefaultTargetMoney = 5000.0;      // [$] Default target (money)
 input double          InpMaxTargetPct       = 5.0;         // [%] Hard cap (%)
 input double          InpMaxTargetMoney     = 5000.0;      // [$] Hard cap (money)
-input bool            InpUsePartialTP       = false;       // Partial close at default target
-input double          InpPartialPercent     = 50.0;        // Partial size (%)
+input bool            InpUsePartialTP       = true;        // Partial close at default target
+input double          InpPartialPercent     = 55.0;        // Partial size (%)
 
 input group "Momentum runner"
 input double          InpMomentumBodyATR    = 1.3;         // Displacement (body >= x*ATR)
@@ -84,12 +85,17 @@ input int             InpMomentumStallBars  = 3;           // Stall / progress w
 input double          InpAtrContractionFac  = 0.6;         // Exhaustion (ATR < x*ATR@entry)
 input double          InpTrailPadPoints     = 0;           // Structure-trail pad (points)
 
+input group "Profit ratchet"
+input bool            InpUseRatchet         = true;        // Ratchet SL to a rising floor of peak profit
+input double          InpRatchetTriggerR    = 2.0;         // Arm once peak profit reaches this many R (peak / risk money)
+input double          InpRatchetLockFrac    = 0.5;         // Lock this fraction of peak profit as the floor
+
 input group "Management cadence"
 input bool            InpManageOnBarClose   = true;        // Manage position on bar close only (tick-model independent)
 
 input group "Add positions on a risk-free trade"
 input bool            InpAddWhenBE          = false;       // Allow a new position once every open one is at break-even
-input ENUM_ADD_DIRECTION InpAddDirection    = ADD_DIR_BOTH;// Which direction may be added
+input ENUM_ADD_DIRECTION InpAddDirection    = ADD_DIR_SAME;// Which direction may be added
 input int             InpMaxOpenPositions   = 2;           // Max concurrent positions (1-8)
 
 input group "Session caps"
@@ -102,7 +108,7 @@ input group "Logging"
 input bool            InpWriteCsv           = true;        // Write per-trade analytics CSV (MAE/MFE, context, exits)
 input bool            InpTrackCounterfactual= true;        // Track what the ORIGINAL SL/TP would have done after an early exit
 input int             InpCounterfactualBars = 720;         // How long to watch (bars; 720 = 24h on M2)
-input bool            InpWriteJournal       = false;       // Write the styled .xls journal (slower; CSV is a superset)
+input bool            InpWriteJournal       = true;        // Write the styled .xls journal (slower; CSV is a superset)
 input bool            InpDebug              = false;       // Print per-bar detection trace to Experts log
 
 input group "Visuals"
@@ -140,6 +146,7 @@ CTrade           g_trade;
 
 SStratState      g_state;
 datetime         g_lastBar=0;
+int              g_atrHandle=INVALID_HANDLE;   // for the entry-time SL/ATR filter
 
 //--- One tracked position. Normally there is exactly one; with
 //--- addWhenBreakEven the EA may hold up to maxOpenPositions at once.
@@ -191,6 +198,16 @@ int ParseHM(const string hm)
   }
 
 //+------------------------------------------------------------------+
+//| Latest completed-bar ATR, for the entry-time SL/ATR filter        |
+//+------------------------------------------------------------------+
+double CurrentATR()
+  {
+   double a[]; ArraySetAsSeries(a,true);
+   if(CopyBuffer(g_atrHandle,0,0,2,a)<1) return(0);
+   return(a[0]);
+  }
+
+//+------------------------------------------------------------------+
 void BuildSettings()
   {
    g_s.tf                    =InpTF;
@@ -220,6 +237,7 @@ void BuildSettings()
    g_s.riskMoney             =InpRiskMoney;
    g_s.slAnchor              =InpSLAnchor;
    g_s.slBufferPoints        =InpSLBufferPoints;
+   g_s.maxSlAtrRatio         =InpMaxSlAtrRatio;
    g_s.breakEvenAtPercent    =InpBreakEvenAtPercent;
    g_s.breakEvenAtMoney      =InpBreakEvenAtMoney;
    g_s.defaultTargetPercent  =InpDefaultTargetPct;
@@ -228,6 +246,9 @@ void BuildSettings()
    g_s.maxTargetMoney        =InpMaxTargetMoney;
    g_s.usePartialTP          =InpUsePartialTP;
    g_s.partialPercent        =InpPartialPercent;
+   g_s.useRatchet            =InpUseRatchet;
+   g_s.ratchetTriggerR       =InpRatchetTriggerR;
+   g_s.ratchetLockFrac       =InpRatchetLockFrac;
    g_s.momentumBodyATR       =InpMomentumBodyATR;
    g_s.momentumStallBars     =InpMomentumStallBars;
    g_s.atrContractionFactor  =InpAtrContractionFac;
@@ -255,6 +276,7 @@ int OnInit()
    g_entry.Init(g_s,sym);
    g_risk.Init(g_s,sym);
    g_dtp.Init(g_s,sym);
+   g_atrHandle=iATR(sym,g_s.tf,14);
    g_journal.Init(g_s.writeJournal,sym);
    g_analytics.Init(InpWriteCsv,InpTrackCounterfactual,InpCounterfactualBars,sym);
    g_visuals.Init(ChartID(),InpShowVisuals,InpColorRange,InpColorAsia,InpColorLondon,InpColorNY);
@@ -349,6 +371,7 @@ void OnDeinit(const int reason)
    g_visuals.Destroy();
    g_dash.Destroy();
    g_dtp.Deinit();
+   if(g_atrHandle!=INVALID_HANDLE) IndicatorRelease(g_atrHandle);
   }
 
 //+------------------------------------------------------------------+
@@ -937,6 +960,25 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
         }
      }
    double sl    =isBuy?anchor-buf:anchor+buf;
+
+   // Backtest finding: trades whose SL sits wide relative to volatility are net
+   // negative as a group (Welch p=0.0099 on the 602-trade export). Reject before
+   // sizing rather than just sizing down, since the edge is genuinely absent, not
+   // just under-risked. Measured against the live ask/bid, same as OpenMarket's
+   // reference price, since LIMIT vs MARKET is not resolved yet at this point.
+   if(g_s.maxSlAtrRatio>0)
+     {
+      double atrNow=CurrentATR();
+      double refPx =isBuy?ask:bid;
+      double slDist=MathAbs(refPx-sl);
+      if(atrNow>0 && slDist/atrNow>g_s.maxSlAtrRatio)
+        {
+         PrintFormat("[SS] SKIPPED (%s %s): SL/ATR %.2f exceeds max %.2f (sl dist %.2f, atr %.2f)",
+                     sig.model,isBuy?"BUY":"SELL",slDist/atrNow,g_s.maxSlAtrRatio,slDist,atrNow);
+         return;
+        }
+     }
+
    long   stopsLvl=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    double minDist =stopsLvl*point;
 

@@ -181,17 +181,25 @@ struct SSettings
    double            riskMoney;               // 500   [MONEY mode]
    ENUM_SL_ANCHOR    slAnchor;                // CHoCH leg extreme vs sweep wick
    double            slBufferPoints;          // pad beyond wick
+   double            maxSlAtrRatio;           // reject entry if SL distance / ATR exceeds this (0 = off)
    double            breakEvenAtPercent;      // 0.25  (~0.5R at riskPercent 0.5)
    double            breakEvenAtMoney;        // 250   [MONEY mode]
    // Targets
-   double            defaultTargetPercent;    // 5.0
+   double            defaultTargetPercent;    // 2.5
    double            defaultTargetMoney;      // 5000  [MONEY mode]
-   double            maxTargetPercent;        // 5.0 - equal to the default target, so the
+   double            maxTargetPercent;        // 5.0 - strictly above the default target, so the
                                               // partial and the structure trail below the
-                                              // cap check in DynamicTP are unreachable
+                                              // cap check in DynamicTP are reachable
    double            maxTargetMoney;          // 5000  [MONEY mode]
-   bool              usePartialTP;            // false
-   double            partialPercent;          // 50
+   bool              usePartialTP;            // true
+   double            partialPercent;          // 55
+   // Profit ratchet: once peak profit clears ratchetTriggerR x the trade's own
+   // risk, lock ratchetLockFrac of that peak as a rising SL floor. Covers the
+   // gap between break-even (~0.5R) and the default target, which previously
+   // had no protection beyond the flat BE line.
+   bool              useRatchet;              // true
+   double            ratchetTriggerR;         // 2.0
+   double            ratchetLockFrac;         // 0.5
    // Momentum
    double            momentumBodyATR;         // 1.3
    int               momentumStallBars;       // 3
