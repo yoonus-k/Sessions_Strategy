@@ -883,6 +883,56 @@ double LegExtremeSince(const datetime fromT,const bool isBuy)
 //| Market entry with a given SL: clamp, size, send, register.        |
 //| Prints an English journal line on success or failure.             |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| The terminal is the witness when the send is not                 |
+//+------------------------------------------------------------------+
+// MetaTrader build 6116 returns false from OrderSend for an order the server
+// has placed, with an EMPTY result -- retcode 0. CTrade passes that straight
+// through, so `ok` is false and ResultOrder() is 0 for a live order. These two
+// answer the only question that matters afterwards: does it exist?
+//
+// Filtered on our own magic, the symbol, the side, the volume and "placed
+// since we sent", so they cannot pick up anything but the order we just asked
+// for. Nothing here adopts an order this EA is already tracking.
+
+ulong FindOwnWorkingOrder(const ENUM_ORDER_TYPE want,const double lots,
+                          const double price,const datetime since)
+  {
+   double tol=SymbolInfoDouble(_Symbol,SYMBOL_POINT)*100;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      ulong t=OrderGetTicket(i);
+      if(t==0) continue;
+      if(t==g_pendingTicket) continue;                       // already ours
+      if(OrderGetInteger(ORDER_MAGIC)!=g_s.magic) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE)!=want) continue;
+      if((datetime)OrderGetInteger(ORDER_TIME_SETUP)<since) continue;
+      if(MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-lots)>0.00001) continue;
+      if(MathAbs(OrderGetDouble(ORDER_PRICE_OPEN)-price)>tol) continue;
+      return(t);
+     }
+   return(0);
+  }
+
+ulong FindOwnRecentPosition(const bool isBuy,const double lots,const datetime since)
+  {
+   long want=isBuy?POSITION_TYPE_BUY:POSITION_TYPE_SELL;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i);
+      if(t==0) continue;
+      if(IsTracked(t)) continue;                             // already ours
+      if(PositionGetInteger(POSITION_MAGIC)!=g_s.magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_TYPE)!=want) continue;
+      if((datetime)PositionGetInteger(POSITION_TIME)<since) continue;
+      if(MathAbs(PositionGetDouble(POSITION_VOLUME)-lots)>0.00001) continue;
+      return(t);
+     }
+   return(0);
+  }
+
 bool OpenMarket(const bool isBuy,double sl,const string model)
   {
    double bid  =SymbolInfoDouble(_Symbol,SYMBOL_BID);
@@ -915,20 +965,40 @@ bool OpenMarket(const bool isBuy,double sl,const string model)
    g_reqPrice =entry;
    g_reqSpread=(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
 
+   datetime sentAt=TimeCurrent();
    bool ok=isBuy ? g_trade.Buy (lots,_Symbol,entry,sl,tp,"SS "+model)
                  : g_trade.Sell(lots,_Symbol,entry,sl,tp,"SS "+model);
-   if(!ok)
+
+   long posId=0;
+   if(ok)
      {
-      PrintFormat("[SS] MARKET %s FAILED (%s): retcode=%d %s",
+      ulong deal=g_trade.ResultDeal();
+      if(HistoryDealSelect(deal)) posId=(long)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+     }
+
+   // Same rule as PlaceOrder, and it costs more here: an unadopted POSITION is
+   // one the ratchet, the break-even move and the one-position gate all cannot
+   // see. See FindOwnRecentPosition.
+   if(posId==0)
+     {
+      ulong found=FindOwnRecentPosition(isBuy,lots,sentAt-2);
+      if(found!=0)
+        {
+         posId=(long)found;
+         PrintFormat("[SS] MARKET %s RECOVERED (%s): #%I64u exists despite retcode=%d",
+                     isBuy?"BUY":"SELL",model,found,g_trade.ResultRetcode());
+        }
+     }
+
+   if(posId==0)
+     {
+      PrintFormat("[SS] MARKET %s FAILED (%s): retcode=%d %s (terminal holds no matching position)",
                   isBuy?"BUY":"SELL",model,
                   g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       Alert(StringFormat("SS: MARKET %s FAILED - %s",
                          isBuy?"BUY":"SELL",g_trade.ResultRetcodeDescription()));
       return(false);
      }
-   ulong deal=g_trade.ResultDeal();
-   long posId=0;
-   if(HistoryDealSelect(deal)) posId=(long)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
    OnPositionOpened((ulong)posId,model);
    return(true);
   }
@@ -1023,19 +1093,50 @@ void PlaceOrder(const ENUM_BIAS bias,SEntrySignal &sig)
    g_reqPrice =entry;
    g_reqSpread=(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
 
+   datetime sentAt=TimeCurrent();
    bool ok=isBuy
            ? g_trade.BuyLimit (lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model)
            : g_trade.SellLimit(lots,entry,_Symbol,sl,tp,ORDER_TIME_GTC,0,"SS "+sig.model);
-   if(!ok)
+
+   ulong placed = ok ? g_trade.ResultOrder() : 0;
+
+   // NEVER CONCLUDE "NO ORDER" FROM A FAILED SEND. MetaTrader build 6116
+   // returns false from OrderSend for a pending order the server has ACCEPTED
+   // AND PLACED, leaving the result empty -- retcode 0, which is exactly what
+   // this printed live on 2026-08-26:
+   //
+   //   [SS] LIMIT SELL FAILED (CHoCH): retcode=0 unknown retcode 0
+   //   ...while the journal said: order #152536683214 sell limit 1.43 done in 204ms
+   //
+   // g_pendingTicket then stayed 0 -- and that variable IS the one-position
+   // gate in EvaluateAndAct. With it stuck at 0 the EA believed it had no
+   // working order and no position, so two minutes later it placed a SECOND
+   // entry on the same setup against the same stop. Both filled, both were
+   // stopped out, and neither was ever adopted into g_open[], so neither got a
+   // break-even move or the ratchet. The copied fleet took both.
+   //
+   // The reply is not the only witness -- the terminal is. Adopt what we asked
+   // for rather than walking away from a live order.
+   if(placed==0)
      {
-      PrintFormat("[SS] LIMIT %s FAILED (%s): retcode=%d %s",
+      ENUM_ORDER_TYPE want = isBuy ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+      placed = FindOwnWorkingOrder(want,lots,entry,sentAt-2);
+      if(placed==0) placed = FindOwnRecentPosition(isBuy,lots,sentAt-2);
+      if(placed!=0)
+         PrintFormat("[SS] LIMIT %s RECOVERED (%s): #%I64u exists despite retcode=%d",
+                     isBuy?"BUY":"SELL",sig.model,placed,g_trade.ResultRetcode());
+     }
+
+   if(placed==0)
+     {
+      PrintFormat("[SS] LIMIT %s FAILED (%s): retcode=%d %s (terminal holds no matching order)",
                   isBuy?"BUY":"SELL",sig.model,
                   g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       Alert(StringFormat("SS: LIMIT %s FAILED - %s",
                          isBuy?"BUY":"SELL",g_trade.ResultRetcodeDescription()));
       return;
      }
-   g_pendingTicket=g_trade.ResultOrder();
+   g_pendingTicket=placed;
    g_pendingModel =sig.model;
    PrintFormat("[SS] %s %s LIMIT PLACED @ %.2f (SL %.2f, %.2f lots) - waiting for pullback fill",
                sig.model,isBuy?"BUY":"SELL",entry,sl,lots);
