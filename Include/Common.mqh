@@ -16,10 +16,24 @@ enum ENUM_BIAS
 //--- Which approved session a timestamp belongs to
 enum ENUM_SESSION
   {
-   SESSION_NONE = 0,
-   SESSION_ASIA = 1,
-   SESSION_NY   = 2
+   SESSION_NONE   = 0,
+   SESSION_ASIA   = 1,
+   SESSION_NY     = 2,
+   SESSION_LONDON = 3   // 09:00-12:00 Riyadh (appended: do NOT renumber)
   };
+
+//--- Single definition of a session's display name (dashboard, box label,
+//--- journal, logs) so a fourth session never needs a new ternary chain
+string SessionName(const ENUM_SESSION ses)
+  {
+   switch(ses)
+     {
+      case SESSION_ASIA:   return("ASIA");
+      case SESSION_LONDON: return("LONDON");
+      case SESSION_NY:     return("NY");
+     }
+   return("-");
+  }
 
 //--- Entry confirmation model selection
 enum ENUM_ENTRY_MODEL
@@ -57,6 +71,8 @@ struct SSettings
    double            brokerToRiyadhOffsetHr;  // server -> Riyadh hours
    int               asiaStartMin;            // minutes from midnight (Riyadh)
    int               asiaEndMin;
+   int               londonStartMin;
+   int               londonEndMin;
    int               nyStartMin;
    int               nyEndMin;
    int               dayCloseHourRiyadh;      // anchor for prior-day 4h range
@@ -86,9 +102,13 @@ struct SSettings
    double            trailPadPoints;
    // Caps
    int               maxTradesPerSession;     // 2
+   int               maxTradesPerDay;         // 3 (across all sessions)
    bool              stopAfterFirstWin;       // true
    bool              tradeMonday;             // allow trading on Monday
    bool              tradeFriday;             // allow trading on Friday
+   // Auto bias (prediction file)
+   bool              autoBias;                // direction from the prediction CSV
+   double            minConfidence;           // skip rows below this confidence
    // Logging
    bool              writeJournal;
   };
@@ -116,7 +136,13 @@ struct SStratState
    int          wins;
    bool         canOpen;
    int          maxTrades;
+   int          dayTrades;      // trades taken today (all sessions)
+   int          maxDayTrades;
    bool         dayAllowed;
+   // auto-bias (prediction file) status, for the dashboard
+   bool         autoMode;
+   string       predLabel;      // "" = no row for this session
+   double       predConf;
    bool         positionOpen;
    double       floatPct;
    bool         pending;

@@ -45,12 +45,43 @@ public:
       m_rangeHigh=0; m_rangeLow=0;
      }
 
+   //+----------------------------------------------------------------+
+   //| Session bounds, in ONE place. Every timing query below derives  |
+   //| from these two accessors, so adding a session means adding a    |
+   //| case here (and to ENUM_SESSION / SessionName) - nothing else.   |
+   //+----------------------------------------------------------------+
+   int SessionStartMin(const ENUM_SESSION ses) const
+     {
+      switch(ses)
+        {
+         case SESSION_ASIA:   return(m_s.asiaStartMin);
+         case SESSION_LONDON: return(m_s.londonStartMin);
+         case SESSION_NY:     return(m_s.nyStartMin);
+        }
+      return(-1);
+     }
+
+   int SessionEndMin(const ENUM_SESSION ses) const
+     {
+      switch(ses)
+        {
+         case SESSION_ASIA:   return(m_s.asiaEndMin);
+         case SESSION_LONDON: return(m_s.londonEndMin);
+         case SESSION_NY:     return(m_s.nyEndMin);
+        }
+      return(-1);
+     }
+
    //--- Which approved session the given server time falls in
    ENUM_SESSION CurrentSession(const datetime serverNow) const
      {
       int m=RiyadhMinuteOfDay(ToRiyadh(serverNow,m_s));
-      if(m>=m_s.asiaStartMin && m<m_s.asiaEndMin) return(SESSION_ASIA);
-      if(m>=m_s.nyStartMin   && m<m_s.nyEndMin)   return(SESSION_NY);
+      ENUM_SESSION all[3]={SESSION_ASIA,SESSION_LONDON,SESSION_NY};
+      for(int i=0;i<3;i++)
+        {
+         int st=SessionStartMin(all[i]), en=SessionEndMin(all[i]);
+         if(st>=0 && en>st && m>=st && m<en) return(all[i]);
+        }
       return(SESSION_NONE);
      }
 
@@ -59,7 +90,7 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return(false);
-      int start=(ses==SESSION_ASIA)?m_s.asiaStartMin:m_s.nyStartMin;
+      int start=SessionStartMin(ses);
       int m=RiyadhMinuteOfDay(ToRiyadh(serverNow,m_s));
       return(m>=start && m<start+m_s.entryWindowMinutes);
      }
@@ -69,8 +100,13 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return("");
-      string tag=(ses==SESSION_ASIA)?"ASIA":"NY";
-      return(DayKey(ToRiyadh(serverNow,m_s))+"-"+tag);
+      return(DayKey(ToRiyadh(serverNow,m_s))+"-"+SessionName(ses));
+     }
+
+   //--- Riyadh calendar day, used for the per-day trade cap
+   string DayKeyOf(const datetime serverNow) const
+     {
+      return(DayKey(ToRiyadh(serverNow,m_s)));
      }
 
    //--- Server time of the active session's open
@@ -78,9 +114,23 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return(0);
-      int start=(ses==SESSION_ASIA)?m_s.asiaStartMin:m_s.nyStartMin;
       datetime riyadhMidnight=RiyadhMidnight(ToRiyadh(serverNow,m_s));
-      return(FromRiyadh(riyadhMidnight+start*60,m_s));
+      return(FromRiyadh(riyadhMidnight+SessionStartMin(ses)*60,m_s));
+     }
+
+   //--- The active session's window in RIYADH time. The prediction feed is
+   //    keyed on Riyadh timestamps, and looking a row up by window (rather
+   //    than by an exact "03:00"/"09:00" string) keeps the match correct if
+   //    a session's configured hours are ever retuned.
+   bool SessionWindowRiyadh(const datetime serverNow,
+                            datetime &startR,datetime &endR) const
+     {
+      ENUM_SESSION ses=CurrentSession(serverNow);
+      if(ses==SESSION_NONE) return(false);
+      datetime midnight=RiyadhMidnight(ToRiyadh(serverNow,m_s));
+      startR=midnight+SessionStartMin(ses)*60;
+      endR  =midnight+SessionEndMin(ses)*60;
+      return(true);
      }
 
    //+------------------------------------------------------------------+
@@ -205,9 +255,8 @@ public:
      {
       ENUM_SESSION ses=CurrentSession(serverNow);
       if(ses==SESSION_NONE) return(0);
-      int end=(ses==SESSION_ASIA)?m_s.asiaEndMin:m_s.nyEndMin;
       datetime riyadhMidnight=RiyadhMidnight(ToRiyadh(serverNow,m_s));
-      return(FromRiyadh(riyadhMidnight+end*60,m_s));
+      return(FromRiyadh(riyadhMidnight+SessionEndMin(ses)*60,m_s));
      }
   };
 

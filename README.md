@@ -13,8 +13,10 @@ momentum-aware take-profit**) on top of that bias.
 
 ## 1. Strategy in one paragraph
 
-Trade only during two approved sessions (**Riyadh local time, GMT+3**). At each session open you
-click a bias button (**BUY / SELL / NONE**). The EA then waits for price to **sweep the nearest
+Trade only during three approved sessions (**Riyadh local time, GMT+3**): Asia 03:00–06:00,
+London 09:00–12:00, NY 15:00–18:00. At each session open you click a bias button
+(**BUY / SELL / NONE**) — or let **full-auto mode** (§11) read the direction from a prediction
+file instead. The EA then waits for price to **sweep the nearest
 opposing liquidity** — for a buy, price simply trades **below** a prior low; for a sell, **above**
 a prior high (just taking the level is enough). After the sweep, it requires a **CHoCH**
 (close-confirmed) or an **IFVG** reaction as the entry trigger. If that confirmation appears
@@ -33,13 +35,13 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 |-------|----------|
 | **Timeframe** | Primarily **M2** (configurable). |
 | **Timezone** | Sessions in **Riyadh local time (GMT+3, no DST)**; converted from broker server time via offset. |
-| **Bias input** | **On-chart BUY / SELL / NONE buttons.** Default `NONE`. |
+| **Bias input** | **On-chart BUY / SELL / NONE buttons.** Default `NONE`. Optionally **full auto** from a prediction file (§11), which makes the panel read-only. |
 | **Entry confirmation** | **CHoCH** (close-confirmed break) → **pending LIMIT at 25% retrace of the breaking leg**; **IFVG** secondary → market entry. First valid trigger after the sweep wins. |
 | **Entry window** | **Configurable minutes** from session open (default 90). |
 | **Sweep** | Price simply **takes the level** (trades beyond the prior high/low). No close-back-inside required — the *entry model* provides the reversal confirmation. |
 | **Default target** | **4%** by default, regardless of structure. Extension beyond 4% is decided by nearest high/low + momentum, capped at 10%. |
 | **Stop loss** | **At the entry pattern's own leg extreme** by default (`SLAnchor`): CHoCH → the breaking-leg extreme; IFVG → the extreme of the reclaim leg since the zone formed. The `SWEEP_WICK` option anchors at the session extreme instead. Optional small buffer. |
-| **Session caps** | Stop after **1 win**; otherwise up to **2** trades. No daily cap — next session continues normally, same day or next. |
+| **Session caps** | Stop after **1 win**; otherwise up to **2** trades per session, and at most **`MaxTradesPerDay`** (default 3) across all three sessions in a Riyadh day. |
 | **Rule 14** | EA simply never auto-closes before +4% (no manual-block logic). |
 | **TP > 10%** | Cap at 10%, always trade if valid. |
 | **Symbol** | **XAUUSD (Gold) only.** |
@@ -50,7 +52,7 @@ first win**, otherwise up to **two** trades; the next session (same day or next 
 
 | # | Rule (charter) | EA implementation |
 |---|----------------|-------------------|
-| 1 | **Approved sessions** — Asia 03:00–06:00, NY 15:00–18:00 | Two windows in **Riyadh time**. |
+| 1 | **Approved sessions** — Asia 03:00–06:00, London 09:00–12:00, NY 15:00–18:00 | Three windows in **Riyadh time**. Each session carries its own independent trade caps; a **daily cap** (`MaxTradesPerDay`, default 3) limits the day across all three. |
 | 2 | **Asia condition** — price must exit the prior 4-hour range | The range box (last 4h of the previous day) is **drawn for reference only**, confined to its own 4 hours. The breakout check is the **trader's manual job** — the EA does not gate entries on it. |
 | 3 | **Entry timing** — only within the first ~1.5 hours | Hard gate via input `EntryWindowMinutes` (default 90). No entry after. |
 | 4 | **Sell** — sweep prior **highs** first | SELL requires price to trade **above** the nearest prior swing high. |
@@ -222,7 +224,11 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 |-------|-------|---------|-------|
 | General | `WorkingTimeframe` | M2 | Primary analysis TF |
 | Sessions | `AsiaStart` / `AsiaEnd` | 03:00 / 06:00 | Riyadh time |
+| Sessions | `LondonStart` / `LondonEnd` | 09:00 / 12:00 | Riyadh time |
 | Sessions | `NYStart` / `NYEnd` | 15:00 / 18:00 | Riyadh time |
+| Auto | `InpAutoBias` | false | Full auto: direction from the prediction file (§11) |
+| Auto | `InpPredictionFile` | geometry_backtest_predictions_XAUUSD.csv | CSV in the **Common** folder |
+| Auto | `InpMinConfidence` | 50.0 | Skip predictions below this confidence |
 | Sessions | `BrokerToRiyadhOffsetHours` | TBD | Server → Riyadh |
 | Asia | `DayCloseHourRiyadh` | 00:00 | Anchor for prior-day last-4h range |
 | Asia | `RangeLengthHours` | 4 | Rule 2 |
@@ -246,12 +252,13 @@ before 10%, and is what actually takes a trade out when momentum fades (rather t
 | TP | `AtrContractionFactor` | 0.6 | Exhaustion |
 | TP | `TrailPadPoints` | broker-tuned | Structure-trail pad |
 | Caps | `MaxTradesPerSession` | 2 | Rule 10 |
+| Caps | `MaxTradesPerDay` | 3 | Across all sessions (0 = off) |
 | Caps | `StopAfterFirstWin` | true | Rule 10 |
 | Logging | `WriteTradeJournalCSV` | true | Rule 16 helper |
 | Logging | `Debug` | false | Per-bar detection trace to the Experts log |
 | Visuals | `ShowVisuals` | true | Range/session boxes |
 | Visuals | `ShowSignals` | true | Sweep / CHoCH / IFVG / trade levels |
-| Visuals | `ColorRange / Asia / NY` | gold / blue / red | Box colors |
+| Visuals | `ColorRange / Asia / London / NY` | gold / blue / green / red | Box colors |
 | Visuals | `ColorChoch / Ifvg / Sweep` | aqua / orchid / khaki | Signal colors |
 | Visuals | `ShowSwings` | true | Detected swing-high/low dots |
 | Visuals | `ColorSwingHi / Lo` | tomato / green | Swing dot colors |
@@ -388,7 +395,72 @@ Sessions are in **Riyadh time (GMT+3)**. The EA needs your broker's **server-tim
 
 ---
 
-## 11. Status / next step
+## 11. Full-auto mode (bias from the prediction file) ⭐
+
+Set **`InpAutoBias = true`** and the EA stops asking you for a direction: it reads one row per
+session from a pre-computed prediction CSV and arms that direction itself. Everything downstream
+(sweep, CHoCH/IFVG, risk, caps, dynamic TP) is unchanged — only the *bias source* differs.
+
+### 11.1 The file
+`<AppData>/MetaQuotes/Terminal/Common/Files/<InpPredictionFile>` — the **Common** folder, the same
+place the trade report lives, so the tester and a live chart read one identical path.
+
+```
+Time,Prediction,Confidence
+2019.01.02 09:00,Inside / Failure,32.26
+2019.01.03 09:00,Bullish Expansion,60.53
+```
+`Time` is the **Riyadh session open**. The row is matched to a session by *window*
+(`[open, close)`), not by an exact "09:00" string, so retuning a session's hours cannot silently
+break the match.
+
+### 11.2 Label → direction
+
+| Label | Direction |
+|---|---|
+| `Bullish Expansion` | **BUY** |
+| `Bearish Expansion` | **SELL** |
+| `Bullish Trap` / `Bearish Trap` | **no trade** — a trap is a failed move, not a direction |
+| `Inside / Failure` | **no trade** |
+| no row for the session / unknown label | **no trade** |
+
+A session that resolves to no direction simply never arms, and the existing gate chain blocks
+everything after it. The dashboard's **Prediction** row and **Note** line always say which case fired.
+
+### 11.3 Confidence threshold
+`InpMinConfidence` (default **50**) drops rows scoring below it.
+
+> ⚠️ **Confidence is not comparable across labels.** In the shipped file the `Inside / Failure` rows
+> carry the *high* scores (median 63, max 98) while the tradable `Expansion` rows sit much lower
+> (median 49, max 74). A threshold of 60 therefore keeps only ~6% of expansion signals — and no
+> Asia signal at all (Asia expansion tops out at 50.0). Signal counts over the file's 7.4 years:
+>
+> | Threshold | Armed sessions | ≈ per year | Asia / London / NY |
+> |---|---|---|---|
+> | 45 | 1523 | 206 | 46 / 637 / 840 |
+> | **50** | **1017** | **137** | 23 / 413 / 581 |
+> | 55 | 393 | 53 | 0 / 200 / 193 |
+> | 60 | 144 | 19 | 0 / 94 / 50 |
+>
+> The model almost never predicts expansion for Asia (46 rows of 1911), so **auto mode is
+> effectively a London + NY strategy**.
+
+### 11.4 Operational notes
+- The panel becomes **read-only status** in auto mode — clicks cannot override the prediction, and
+  `ForcedBias` is ignored.
+- The bias is resolved **once per session change** and does not drift mid-session.
+- Every decision prints `[SS] AUTO BIAS <session> <time> | <label> conf=<x> -> BUY/SELL/NONE`.
+- **If the file is missing or unreadable, `OnInit` fails** rather than running forever with a bias
+  that can never arm.
+- The file shipped here **ends 2026-06-02**; sessions after its last row have no prediction and will
+  not trade. `OnInit` prints a warning when the file ends before the current date. **Regenerate the
+  CSV to keep auto mode trading.**
+- The trade report gains **Prediction** and **Confidence** columns, so results can be sliced by
+  label after a run.
+
+---
+
+## 12. Status / next step
 
 Code is written but **not yet compiled in MetaEditor** in this environment — Step A.3 is your first
 checkpoint; fix any compiler messages (or paste them to me). The IFVG/CHoCH detection is **v1** and is

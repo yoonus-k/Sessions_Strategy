@@ -45,7 +45,7 @@ public:
      {
       m_chart=chart_id; m_symbol=symbol;
       m_digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
-      m_x=10; m_y=70; m_w=300; m_lineH=16; m_rows=10;
+      m_x=10; m_y=70; m_w=320; m_lineH=16; m_rows=11;
 
       string bg=DASH_PREFIX+"BG";
       ObjectCreate(m_chart,bg,OBJ_RECTANGLE_LABEL,0,0,0);
@@ -71,10 +71,9 @@ public:
 
       string b=(s.bias==BIAS_BUY)?"BUY":(s.bias==BIAS_SELL)?"SELL":"NONE";
       color  bc=(s.bias==BIAS_BUY)?cGood:(s.bias==BIAS_SELL)?cBad:clrSilver;
-      Label(1,"Bias        : "+b,bc);
+      Label(1,"Bias        : "+b+(s.autoMode?"   [AUTO]":""),bc);
 
-      string ses=(s.session==SESSION_ASIA)?"ASIA":(s.session==SESSION_NY)?"NY":"-";
-      Label(2,"Session     : "+ses+"   Window: "+YN(s.inWindow),
+      Label(2,"Session     : "+SessionName(s.session)+"   Window: "+YN(s.inWindow),
             s.session==SESSION_NONE?cInfo:(s.inWindow?cGood:cWait));
 
       // 4H range values are reference only - the breakout check is manual
@@ -89,15 +88,26 @@ public:
       Label(5,"Entry model : "+em,s.entryMet?cGood:cWait);
 
       Label(6,"Trades      : "+(string)s.trades+"/"+(string)s.maxTrades
-            +"  Wins: "+(string)s.wins+"  Day: "+(s.dayAllowed?"OK":"OFF"),
+            +"  Day: "+(string)s.dayTrades+"/"+(string)s.maxDayTrades
+            +"  Wins: "+(string)s.wins+(s.dayAllowed?"":"  [DAY OFF]"),
             (s.canOpen && s.dayAllowed)?cInfo:cBad);
 
+      // prediction row: only meaningful in auto mode
+      if(s.autoMode)
+        {
+         string pl=(s.predLabel=="")?"no row for this session"
+                   :StringFormat("%s  %.2f",s.predLabel,s.predConf);
+         Label(7,"Prediction  : "+pl,(s.bias==BIAS_NONE)?cWait:cGood);
+        }
+      else
+         Label(7,"Prediction  : (auto mode off)",cInfo);
+
       string pos=s.positionOpen?StringFormat("OPEN  %.2f%%",s.floatPct):"none";
-      Label(7,"Position    : "+pos+(s.pending?"   [LIMIT pending]":""),
+      Label(8,"Position    : "+pos+(s.pending?"   [LIMIT pending]":""),
             s.positionOpen?cGood:cInfo);
 
-      Label(8,"Note        : "+s.note,cInfo);
-      Label(9,DayOfWeekName(TimeCurrent())+"  "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES)
+      Label(9,"Note        : "+s.note,cInfo);
+      Label(10,DayOfWeekName(TimeCurrent())+"  "+TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES)
             +"  (server)",clrSilver);
 
       ChartRedraw(m_chart);

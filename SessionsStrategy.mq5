@@ -21,6 +21,7 @@
 #include "Include/TradeJournal.mqh"
 #include "Include/Visuals.mqh"
 #include "Include/Dashboard.mqh"
+#include "Include/PredictionFeed.mqh"
 
 //--- Inputs --------------------------------------------------------
 input group "General"
@@ -32,9 +33,21 @@ input group "Timezone / Sessions (Riyadh local time)"
 input double          InpBrokerToRiyadhHr   = 0.0;         // Server -> Riyadh offset (hours)
 input string          InpAsiaStart          = "03:00";     // Asia session start
 input string          InpAsiaEnd            = "06:00";     // Asia session end
+input string          InpLondonStart        = "09:00";     // London session start
+input string          InpLondonEnd          = "12:00";     // London session end
 input string          InpNYStart            = "15:00";     // NY session start
 input string          InpNYEnd              = "18:00";     // NY session end
 input int             InpEntryWindowMinutes = 90;          // Entry window from open (min)
+
+input group "Auto bias (prediction file)"
+input bool            InpAutoBias           = false;       // Full auto: direction from the prediction file
+input string          InpPredictionFile     = "geometry_backtest_predictions_XAUUSD.csv"; // CSV in the COMMON folder
+// NOTE: confidence is NOT comparable across labels. In the shipped file the
+// "Inside / Failure" rows carry the high scores (median 63, max 98) while the
+// tradable Expansion rows sit far lower (median 49, max 74). A 60 threshold
+// therefore keeps only ~6% of expansion signals - and never any Asia one.
+// 50 = the median expansion row (~137 signals/yr in the file). Tune it.
+input double          InpMinConfidence      = 50.0;        // Skip predictions below this confidence
 
 input group "Asia prior-day range (rule 2)"
 input int             InpDayCloseHour       = 0;           // Day-close hour (Riyadh)
@@ -68,6 +81,7 @@ input double          InpTrailPadPoints     = 0;           // Structure-trail pa
 
 input group "Session caps"
 input int             InpMaxTradesPerSession= 2;           // Max trades per session
+input int             InpMaxTradesPerDay    = 3;           // Max trades per day (all sessions; 0 = off)
 input bool            InpStopAfterFirstWin  = true;        // Stop after first win
 input bool            InpTradeMonday        = true;        // Allow trading on Monday
 input bool            InpTradeFriday        = true;        // Allow trading on Friday
@@ -80,6 +94,7 @@ input group "Visuals"
 input bool            InpShowVisuals        = true;        // Draw range/session boxes
 input color           InpColorRange         = clrGoldenrod;// Prev-day 4H range
 input color           InpColorAsia          = clrDodgerBlue;// Asia session range
+input color           InpColorLondon        = clrMediumSeaGreen;// London session range
 input color           InpColorNY            = clrTomato;   // NY session range
 input bool            InpShowSignals        = true;        // Draw sweep / CHoCH / IFVG / trades
 input color           InpColorChoch         = clrAqua;     // CHoCH leg & levels
@@ -105,6 +120,7 @@ CDynamicTP       g_dtp;
 CTradeJournal    g_journal;
 CVisuals         g_visuals;
 CDashboard       g_dash;
+CPredictionFeed  g_feed;
 CTrade           g_trade;
 
 SStratState      g_state;
@@ -122,6 +138,12 @@ string           g_openModel="";      // entry model of the open trade (report)
 string           g_openDay="";        // Riyadh week-day the trade opened on
 double           g_openLots=0;
 string           g_lastSessionKey="";
+// prediction backing the CURRENT session's auto bias (dashboard + report)
+string           g_predLabel="";
+double           g_predConf=0;
+string           g_openPredLabel="";   // snapshot at fill, for the report row
+double           g_openPredConf=0;
+string           g_autoNote="";        // why auto mode did/didn't arm a bias
 
 //+------------------------------------------------------------------+
 int ParseHM(const string hm)
@@ -139,6 +161,8 @@ void BuildSettings()
    g_s.brokerToRiyadhOffsetHr=InpBrokerToRiyadhHr;
    g_s.asiaStartMin          =ParseHM(InpAsiaStart);
    g_s.asiaEndMin            =ParseHM(InpAsiaEnd);
+   g_s.londonStartMin        =ParseHM(InpLondonStart);
+   g_s.londonEndMin          =ParseHM(InpLondonEnd);
    g_s.nyStartMin            =ParseHM(InpNYStart);
    g_s.nyEndMin              =ParseHM(InpNYEnd);
    g_s.dayCloseHourRiyadh    =InpDayCloseHour;
@@ -163,9 +187,12 @@ void BuildSettings()
    g_s.atrContractionFactor  =InpAtrContractionFac;
    g_s.trailPadPoints        =InpTrailPadPoints;
    g_s.maxTradesPerSession   =InpMaxTradesPerSession;
+   g_s.maxTradesPerDay       =InpMaxTradesPerDay;
    g_s.stopAfterFirstWin     =InpStopAfterFirstWin;
    g_s.tradeMonday           =InpTradeMonday;
    g_s.tradeFriday           =InpTradeFriday;
+   g_s.autoBias              =InpAutoBias;
+   g_s.minConfidence         =InpMinConfidence;
    g_s.writeJournal          =InpWriteJournal;
   }
 
@@ -181,14 +208,30 @@ int OnInit()
    g_risk.Init(g_s,sym);
    g_dtp.Init(g_s,sym);
    g_journal.Init(g_s.writeJournal,sym);
-   g_visuals.Init(ChartID(),InpShowVisuals,InpColorRange,InpColorAsia,InpColorNY);
+   g_visuals.Init(ChartID(),InpShowVisuals,InpColorRange,InpColorAsia,
+                  InpColorLondon,InpColorNY);
    g_visuals.InitSignals(InpShowSignals,InpColorChoch,InpColorIfvg,InpColorSweep);
    g_visuals.InitSwings(InpShowSwings,InpColorSwingHi,InpColorSwingLo);
    g_visuals.SetFvgColor(InpColorFvg);
    g_dash.Init(ChartID(),sym);
 
-   // backtest convenience: arm a fixed bias without clicking the panel
-   if(InpForcedBias!=BIAS_NONE) g_panel.SetBias(InpForcedBias);
+   // full-auto mode: the prediction file IS the bias source. Fail loudly at
+   // init rather than running forever with a bias that can never be armed.
+   g_feed.Init();
+   if(g_s.autoBias)
+     {
+      if(!g_feed.Load(InpPredictionFile))
+        {
+         Alert("SS: auto bias is ON but the prediction file could not be loaded - see the Experts log");
+         return(INIT_FAILED);
+        }
+      // a file that ends before today means silent no-trading from that date
+      if(g_feed.LastTime()<ToRiyadh(TimeCurrent(),g_s))
+         PrintFormat("[SS] WARNING: predictions end %s (Riyadh) - sessions after that date have no row and will NOT trade",
+                     TimeToString(g_feed.LastTime(),TIME_DATE));
+     }
+   else if(InpForcedBias!=BIAS_NONE)
+      g_panel.SetBias(InpForcedBias); // backtest convenience (manual modes only)
 
    g_trade.SetExpertMagicNumber(g_s.magic);
    g_trade.SetTypeFillingBySymbol(sym);
@@ -233,13 +276,20 @@ void RefreshDashboardLive()
    g_state.dayAllowed=!(_drl.day_of_week==1 && !g_s.tradeMonday) &&
                       !(_drl.day_of_week==5 && !g_s.tradeFriday);
    g_state.maxTrades =g_s.maxTradesPerSession;
+   g_risk.SyncDay(g_session.DayKeyOf(now));
+   g_state.dayTrades=g_risk.DayTrades(); g_state.maxDayTrades=g_s.maxTradesPerDay;
+   g_state.autoMode =g_s.autoBias;
+   g_state.predLabel=g_predLabel; g_state.predConf=g_predConf;
+
+   string idleNote=g_s.autoBias?(g_autoNote!=""?g_autoNote:"auto: no bias")
+                               :"arm a bias (BUY/SELL)";
    if(g_state.bias==BIAS_NONE)
-      g_state.note="arm a bias (BUY/SELL)";
+      g_state.note=idleNote;
    else if(!g_state.dayAllowed)
       g_state.note=(_drl.day_of_week==1)?"Monday trading disabled":"Friday trading disabled";
    else if(g_state.session==SESSION_NONE)
       g_state.note="armed - out of session";
-   else if(g_state.note=="arm a bias (BUY/SELL)" ||
+   else if(g_state.note==idleNote ||
            g_state.note=="Monday trading disabled" ||
            g_state.note=="Friday trading disabled")
       g_state.note="armed - evaluating on bar close";
@@ -247,8 +297,67 @@ void RefreshDashboardLive()
   }
 
 //+------------------------------------------------------------------+
+//| Full-auto bias: resolve the prediction row for the session that   |
+//| just opened and arm it. Called ONCE per session change - the      |
+//| direction must not drift mid-session.                             |
+//|                                                                   |
+//| A session with no row, an untradable label (traps and             |
+//| Inside / Failure are deliberately sat out) or confidence below    |
+//| the threshold arms BIAS_NONE, and the existing gate chain then    |
+//| blocks everything downstream - no special-casing needed.          |
+//+------------------------------------------------------------------+
+void ApplyAutoBias(const datetime now)
+  {
+   g_predLabel=""; g_predConf=0; g_autoNote="";
+
+   ENUM_SESSION ses=g_session.CurrentSession(now);
+   if(ses==SESSION_NONE)                    // left a session
+     {
+      g_panel.SetBias(BIAS_NONE);
+      g_autoNote="auto: out of session";
+      return;
+     }
+
+   datetime sr,er;
+   if(!g_session.SessionWindowRiyadh(now,sr,er))
+     {
+      g_panel.SetBias(BIAS_NONE);
+      return;
+     }
+
+   string label; double conf;
+   if(!g_feed.Lookup(sr,er,label,conf))
+     {
+      g_panel.SetBias(BIAS_NONE);
+      g_autoNote="auto: no prediction row for this session";
+      PrintFormat("[SS] AUTO BIAS %s %s -> NONE (no row)",
+                  SessionName(ses),TimeToString(sr,TIME_DATE|TIME_MINUTES));
+      return;
+     }
+
+   g_predLabel=label; g_predConf=conf;
+
+   ENUM_BIAS b=CPredictionFeed::BiasForLabel(label);
+   if(b==BIAS_NONE)
+      g_autoNote="auto: "+label+" - not traded";
+   else if(conf<g_s.minConfidence)
+     {
+      b=BIAS_NONE;
+      g_autoNote=StringFormat("auto: confidence %.2f < %.2f",conf,g_s.minConfidence);
+     }
+
+   g_panel.SetBias(b);   // panel mirrors the auto decision on screen
+   PrintFormat("[SS] AUTO BIAS %s %s | %s conf=%.2f -> %s%s",
+               SessionName(ses),TimeToString(sr,TIME_DATE|TIME_MINUTES),
+               label,conf,
+               (b==BIAS_BUY?"BUY":b==BIAS_SELL?"SELL":"NONE"),
+               (g_autoNote==""?"":"  ("+g_autoNote+")"));
+  }
+
+//+------------------------------------------------------------------+
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
   {
+   if(g_s.autoBias) return;   // panel is read-only status in auto mode
    ENUM_BIAS prev=g_panel.Bias();
    if(g_panel.OnChartEvent(id,sparam))
      {
@@ -294,7 +403,8 @@ void CheckClosedPosition()
    bool win=(total>0);
    g_risk.RegisterClose(win);
    g_journal.LogTrade(g_openDay,closeTime,g_openSession,g_openBias,g_openModel,
-                      g_openLots,total,AccountInfoDouble(ACCOUNT_BALANCE));
+                      g_openLots,total,AccountInfoDouble(ACCOUNT_BALANCE),
+                      g_openPredLabel,g_openPredConf);
    PrintFormat("[SS] POSITION CLOSED: %I64u exit %.2f, P/L %.2f (%.2f%%) -> %s",
                g_openTicket,exit,total,g_risk.FloatPercent(total),win?"WIN":"LOSS");
 
@@ -320,9 +430,13 @@ void OnPositionOpened(const ulong posTicket,const string model)
    double sl   =PositionGetDouble(POSITION_SL);
    datetime now=TimeCurrent();
    ENUM_SESSION ses=g_session.CurrentSession(now);
-   g_openSession=(ses==SESSION_ASIA)?"ASIA":(ses==SESSION_NY)?"NY":"-";
+   g_openSession=SessionName(ses);
    g_openBias   =isBuy?"BUY":"SELL";
    g_openModel  =model;
+   // freeze the prediction behind this trade; the session (and g_predLabel)
+   // can roll over before the position closes and the row is written
+   g_openPredLabel=g_predLabel;
+   g_openPredConf =g_predConf;
    g_openDay    =DayOfWeekName(ToRiyadh(now,g_s)); // same day base as the Mon/Fri filter
    g_openLots   =lots;
 
@@ -595,8 +709,11 @@ void EvaluateAndAct(const datetime now)
 
    string sk=g_session.SessionKey(now); // session change handled in OnTick
    g_risk.SyncSession(sk);
+   g_risk.SyncDay(g_session.DayKeyOf(now));
    st.trades=g_risk.Trades(); st.wins=g_risk.Wins(); st.canOpen=g_risk.CanOpen();
    st.maxTrades=g_s.maxTradesPerSession;
+   st.dayTrades=g_risk.DayTrades(); st.maxDayTrades=g_s.maxTradesPerDay;
+   st.autoMode=g_s.autoBias; st.predLabel=g_predLabel; st.predConf=g_predConf;
    MqlDateTime _dtw; TimeToStruct(ToRiyadh(now,g_s),_dtw);
    st.dayAllowed=!(_dtw.day_of_week==1 && !g_s.tradeMonday) &&
                  !(_dtw.day_of_week==5 && !g_s.tradeFriday);
@@ -664,10 +781,14 @@ void EvaluateAndAct(const datetime now)
      }
    else
      {
-      if(st.bias==BIAS_NONE)                                  st.note="arm a bias (BUY/SELL)";
+      if(st.bias==BIAS_NONE)
+         st.note=g_s.autoBias?(g_autoNote!=""?g_autoNote:"auto: no bias")
+                             :"arm a bias (BUY/SELL)";
       else if(st.positionOpen)                               st.note="managing position";
       else if(st.pending)                                    st.note="limit pending";
       else if(st.session==SESSION_NONE)                      st.note="out of session";
+      else if(g_risk.DayCapReached())
+         st.note=StringFormat("daily cap reached (%d/%d)",st.dayTrades,st.maxDayTrades);
       else if(!st.canOpen)                                   st.note="session cap reached";
       else if(!st.dayAllowed)                                st.note=dayDisabledNote;
       else if(!st.inWindow)                                  st.note="entry window closed";
@@ -787,8 +908,9 @@ void OnTick()
    datetime now=TimeCurrent();
 
    // poll the bias buttons every tick — this is what makes the panel work
-   // in the Strategy Tester (OnChartEvent is not called there)
-   if(g_panel.PollClicks())
+   // in the Strategy Tester (OnChartEvent is not called there). In auto mode
+   // the panel is status only: a click must not override the prediction.
+   if(!g_s.autoBias && g_panel.PollClicks())
       g_liq.Reset();                 // new bias -> fresh sweep
 
    // session boundary (entering OR leaving a session): wipe this session's
@@ -802,6 +924,8 @@ void OnTick()
       g_visuals.ClearSessionDrawings();
       g_liq.Reset();
       g_lastSessionKey=sk;
+      // auto mode re-resolves the direction for the session that just opened
+      if(g_s.autoBias) ApplyAutoBias(now);
      }
 
    g_session.ComputeRangeIfNeeded(now);

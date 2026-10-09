@@ -24,8 +24,12 @@ class CTradeJournal
 private:
    bool   m_enabled;
    string m_excel;
-   // closed trades kept in memory; each row = 11 ';'-separated fields:
-   // No;Day;Date;Session;Bias;Model;Lots;Profit;Result;Balance;ExBalance
+   // closed trades kept in memory; each row = 13 ';'-separated fields:
+   // No;Day;Date;Session;Bias;Model;Lots;Profit;Result;Balance;ExBalance;
+   // Prediction;Confidence
+   // (the two prediction columns are APPENDED so the numeric indices of the
+   //  older columns - profit at 7, balance at 9 - stay valid for .xls files
+   //  written before auto mode existed)
    string m_rows[];
    double m_profits[];
    bool   m_friMon[];
@@ -51,7 +55,8 @@ private:
       return(s);
      }
 
-   //--- extract the 11 <Data>values</Data> of one of OUR data rows
+   //--- extract the <Data>values</Data> of one of OUR data rows (>=11: a
+   //--- pre-auto-mode file has 11 columns, a current one has 13)
    bool ParseXlsRow(const string line,string &f[])
      {
       if(StringFind(line,"<Row><Cell ss:StyleID=\"winS\"")!=0 &&
@@ -81,8 +86,9 @@ private:
          string line=FileReadString(h);
          string f[];
          if(!ParseXlsRow(line,f)) continue;
+         int nf=ArraySize(f);
          string row=f[0];
-         for(int k=1;k<11;k++) row+=";"+f[k];
+         for(int k=1;k<13;k++) row+=";"+(k<nf?f[k]:"-"); // pad older 11-col rows
          Push(row,StringToDouble(f[7]),
               (f[1]=="Friday"||f[1]=="Monday"),StringToDouble(f[9]));
         }
@@ -109,7 +115,7 @@ private:
       double finalBal=exclFriMon?m_lastBalance-FriMonNet():m_lastBalance;
 
       FileWriteString(h,"<Row/>\r\n");
-      FileWriteString(h,"<Row ss:Height=\"20\"><Cell ss:MergeAcross=\"10\" ss:StyleID=\"sumT\">"
+      FileWriteString(h,"<Row ss:Height=\"20\"><Cell ss:MergeAcross=\"12\" ss:StyleID=\"sumT\">"
                         "<Data ss:Type=\"String\">"+title+"</Data></Cell></Row>\r\n");
       string lab[6]={"Trades","Wins","Losses","Total profit","Total loss","Net P/L"};
       string val[6]={(string)n,(string)w,(string)l,
@@ -156,21 +162,22 @@ private:
         "</Styles>\r\n"
         "<Worksheet ss:Name=\"Trades\"><Table ss:DefaultRowHeight=\"18\">\r\n");
 
-      int widths[11]={35,85,80,65,55,65,55,95,60,100,130};
-      for(int c=0;c<11;c++)
+      int widths[13]={35,85,80,65,55,65,55,95,60,100,130,120,80};
+      for(int c=0;c<13;c++)
          FileWriteString(h,StringFormat("<Column ss:Width=\"%d\"/>\r\n",widths[c]));
 
-      string heads[11]={"No","Day","Date","Session","Bias","Model","Lots",
-                        "Profit/Loss","Result","Balance","Balance ex Fri&amp;Mon"};
+      string heads[13]={"No","Day","Date","Session","Bias","Model","Lots",
+                        "Profit/Loss","Result","Balance","Balance ex Fri&amp;Mon",
+                        "Prediction","Confidence"};
       FileWriteString(h,"<Row ss:Height=\"24\">");
-      for(int c=0;c<11;c++)
+      for(int c=0;c<13;c++)
          FileWriteString(h,Cell(heads[c],false,"hdr"));
       FileWriteString(h,"</Row>\r\n");
 
       for(int i=0;i<m_count;i++)
         {
          string f[];
-         if(StringSplit(m_rows[i],';',f)<11) continue;
+         if(StringSplit(m_rows[i],';',f)<13) continue;
          bool win=(f[8]=="WIN");
          string sS=win?"winS":"lossS", sN=win?"winN":"lossN";
          FileWriteString(h,"<Row>"
@@ -185,6 +192,8 @@ private:
             +Cell(f[8],false,sS)   // Result
             +Cell(f[9],true ,sN)   // Balance
             +Cell(f[10],true,sN)   // Balance ex Fri&Mon
+            +Cell(f[11],false,sS)  // Prediction label
+            +Cell(f[12],true ,sN)  // Confidence
             +"</Row>\r\n");
         }
 
@@ -213,15 +222,19 @@ public:
    //--- one closed trade -> report row + rewritten totals (Excel file)
    void LogTrade(const string day,const datetime closeTime,const string session,
                  const string bias,const string model,const double lots,
-                 const double profitMoney,const double balance)
+                 const double profitMoney,const double balance,
+                 const string predLabel,const double predConf)
      {
       if(!m_enabled) return;
       bool friMon=(day=="Friday"||day=="Monday");
       // balance as if Fri & Mon trades never happened (incl. this one)
       double exBal=balance-(FriMonNet()+(friMon?profitMoney:0));
-      string row=StringFormat("%d;%s;%s;%s;%s;%s;%.2f;%.2f;%s;%.2f;%.2f",
+      // ';' is the row separator, so it must never survive inside a field
+      string pl=(predLabel=="")?"-":predLabel;
+      StringReplace(pl,";",",");
+      string row=StringFormat("%d;%s;%s;%s;%s;%s;%.2f;%.2f;%s;%.2f;%.2f;%s;%.2f",
              m_count+1,day,TimeToString(closeTime,TIME_DATE),session,bias,model,
-             lots,profitMoney,profitMoney>0?"WIN":"LOSS",balance,exBal);
+             lots,profitMoney,profitMoney>0?"WIN":"LOSS",balance,exBal,pl,predConf);
       Push(row,profitMoney,friMon,balance);
       WriteExcel();
      }

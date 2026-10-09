@@ -18,6 +18,9 @@ private:
    string    m_sessionKey;
    int       m_trades;
    int       m_wins;
+   // per-day counter (all sessions share it)
+   string    m_dayKey;
+   int       m_dayTrades;
 
    double    ValuePerLotPerPrice() const
      {
@@ -32,6 +35,7 @@ public:
      {
       m_s=s; m_symbol=symbol;
       m_sessionKey=""; m_trades=0; m_wins=0;
+      m_dayKey="";     m_dayTrades=0;
      }
 
    double CapitalRef() const { return(AccountInfoDouble(ACCOUNT_BALANCE)); }
@@ -84,17 +88,32 @@ public:
         }
      }
 
+   //--- Riyadh calendar day; resets the cross-session daily cap
+   void SyncDay(const string dayKey)
+     {
+      if(dayKey!=m_dayKey){ m_dayKey=dayKey; m_dayTrades=0; }
+     }
+
    bool CanOpen() const
      {
       if(m_s.stopAfterFirstWin && m_wins>0) return(false); // rule 13
+      if(m_s.maxTradesPerDay>0 && m_dayTrades>=m_s.maxTradesPerDay)
+         return(false);                                    // daily cap
       return(m_trades<m_s.maxTradesPerSession);            // rule 10
      }
 
-   void RegisterOpen()              { m_trades++; }
+   //--- true when the DAILY cap is what is blocking (for the note line)
+   bool DayCapReached() const
+     {
+      return(m_s.maxTradesPerDay>0 && m_dayTrades>=m_s.maxTradesPerDay);
+     }
+
+   void RegisterOpen()              { m_trades++; m_dayTrades++; }
    void RegisterClose(const bool win){ if(win) m_wins++; }
 
-   int  Trades() const { return(m_trades); }
-   int  Wins()   const { return(m_wins);   }
+   int  Trades()    const { return(m_trades);    }
+   int  Wins()      const { return(m_wins);      }
+   int  DayTrades() const { return(m_dayTrades); }
   };
 
 #endif // SESSIONS_STRATEGY_RISKMANAGER_MQH
